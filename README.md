@@ -26,6 +26,7 @@ Account / profile (needs a public profile):
 - "What's my Steam level?" / "Does this account have any VAC bans?"
 - "What's on my wishlist, and is any of it on sale right now?"
 - "Analyze my library — what's my backlog and what have I abandoned?"
+- "Based on what I play most, what new games should I check out?"
 
 Account-independent (works for any game, no SteamID needed):
 - "Is *Baldur's Gate 3* any good? What's its review score?"
@@ -35,6 +36,7 @@ Account-independent (works for any game, no SteamID needed):
 - "How much does *Hades II* cost and what genres is it?"
 - "What DLC does *Cities: Skylines* have, and is any of it on sale?"
 - "Is *Elden Ring* a soulslike? What are its community tags?"
+- "Find co-op roguelikes under $20 that are well-reviewed."
 
 ---
 
@@ -57,6 +59,7 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_get_user_game_stats` | **A user's in-game stats** (kills, wins, distance…) for a game | yes |
 | `steam_get_rarest_unlocks` | **A player's rarest achievement unlocks** in a game (by global rarity) | yes |
 | `steam_search_apps` | Game title → appid (+ price) | no |
+| `steam_discover` | **Find/recommend games** by tag, price, sale, platform — optionally **personalized** to a user's taste (excludes games they own) | no* |
 | `steam_get_app_details` | **Full store details** — play modes/co-op, controller, DLC, languages, requirements, Metacritic | no |
 | `steam_get_dlc` | **A game's DLC**, with live prices and what's on sale | no |
 | `steam_get_app_tags` | **A game's top community tags** (Souls-like, Roguelike, Cozy…) | no |
@@ -72,6 +75,10 @@ Account-independent (works for any game, no SteamID needed):
 
 Every tool supports `response_format: "markdown"` (default, human-readable) or
 `"json"` (structured), and all are annotated `readOnlyHint: true`.
+
+> \* `steam_discover` needs no key for the search itself; **personalization**
+> (passing a `steamid` to seed from a user's library) requires a key and a public
+> profile.
 
 > **Recent reviews:** Steam's API only exposes a *lifetime* review summary — there
 > is no "last 30 days" field. So `steam_get_app_reviews` with

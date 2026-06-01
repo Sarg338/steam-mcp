@@ -3,6 +3,17 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.0]
+
+### Added
+- `steam_discover` — find games by **community tags (by name), max price, on-sale,
+  platform, and free text**, sorted by review score / recency / price. Pass a
+  `steamid` to **personalize**: it seeds the tag filter from that user's
+  most-played + recently-played games and (by default) excludes games they already
+  own — turning discovery into a recommendation engine ("what should I play next").
+  Steam does the filtering server-side; results are enriched with live names/prices
+  concurrently. The search needs no API key (personalization does).
+
 ## [0.8.1]
 
 ### Fixed
@@ -107,6 +118,7 @@ All notable changes to this project are documented here. Versions follow
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[0.9.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.9.0
 [0.8.1]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.8.1
 [0.8.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.8.0
 [0.7.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.7.0

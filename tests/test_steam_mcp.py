@@ -153,6 +153,114 @@ def test_http_client_rebinds_across_event_loops():
 
 
 # --------------------------------------------------------------------------- #
+# 0.9.0: discovery / recommendation search
+# --------------------------------------------------------------------------- #
+
+def test_resolve_tag_ids(monkeypatch):
+    async def fake_map():
+        return {29482: "Souls-like", 1685: "Co-op"}
+
+    monkeypatch.setattr(S, "_tag_name_map", fake_map)
+    ids, missing = run(S._resolve_tag_ids(["souls-like", "Co-op", "Nonexistent"]))
+    assert ids == [29482, 1685]          # case-insensitive
+    assert missing == ["Nonexistent"]
+
+
+def test_discover_basic(monkeypatch):
+    async def fake_raw(url, params, cache_ttl=0):
+        return {"success": 1, "total_count": 3,
+                "results_html": '<a data-ds-appid="10"></a>'
+                                '<a data-ds-appid="20"></a><a data-ds-appid="30"></a>'}
+
+    prices = {10: {"name": "A", "price": "$5", "discount_pct": 0, "on_sale": False},
+              20: {"name": "B", "price": "$10", "discount_pct": 50, "on_sale": True},
+              30: {"name": "C", "price": "$1", "discount_pct": 0, "on_sale": False}}
+
+    async def fake_app_price(appid, cc):
+        return prices[appid]
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(S, "_app_price", fake_app_price)
+    out = run(S.steam_discover(S.DiscoverInput(term="x", response_format="json")))
+    d = json.loads(out)
+    assert d["total_count"] == 3 and d["count"] == 3
+    assert [r["appid"] for r in d["results"]] == [10, 20, 30]   # ranked order kept
+    assert d["personalized"] is False
+
+
+def test_discover_explicit_tags(monkeypatch):
+    captured = {}
+
+    async def fake_map():
+        return {29482: "Souls-like"}
+
+    async def fake_raw(url, params, cache_ttl=0):
+        captured.update(params)
+        return {"success": 1, "total_count": 1,
+                "results_html": '<a data-ds-appid="5"></a>'}
+
+    async def fake_app_price(appid, cc):
+        return {"name": "G"}
+
+    monkeypatch.setattr(S, "_tag_name_map", fake_map)
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(S, "_app_price", fake_app_price)
+    out = run(S.steam_discover(S.DiscoverInput(
+        tags=["Souls-like"], max_price=20, on_sale=True, platform="win",
+        response_format="json")))
+    d = json.loads(out)
+    assert d["filters"]["resolved_tag_ids"] == [29482]
+    assert captured["tags"] == "29482"        # name -> id mapped into the query
+    assert captured["maxprice"] == "20"
+    assert captured["specials"] == 1
+    assert captured["os"] == "win"
+
+
+def test_discover_personalized(monkeypatch):
+    async def fake_steam(path, params, **k):
+        if "GetOwnedGames" in path:
+            return {"response": {"games": [
+                {"appid": 10, "name": "Hades", "playtime_forever": 6000},
+                {"appid": 99, "name": "Owned Thing", "playtime_forever": 100}]}}
+        if "GetRecentlyPlayedGames" in path:
+            return {"response": {"games": [
+                {"appid": 10, "name": "Hades", "playtime_2weeks": 300}]}}
+        if "GetItems" in path:
+            return {"response": {"store_items": [
+                {"appid": 10, "tags": [{"tagid": 1716, "weight": 100},
+                                       {"tagid": 4231, "weight": 50}]}]}}
+        return {}
+
+    async def fake_map():
+        return {1716: "Roguelike", 4231: "Action RPG"}
+
+    async def fake_raw(url, params, cache_ttl=0):
+        # search returns three apps, one of which (99) the user owns
+        return {"success": 1, "total_count": 50,
+                "results_html": '<a data-ds-appid="20"></a>'
+                                '<a data-ds-appid="99"></a><a data-ds-appid="30"></a>'}
+
+    prices = {20: {"name": "New A"}, 30: {"name": "New B"}}
+
+    async def fake_app_price(appid, cc):
+        return prices.get(appid, {})
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(S, "_tag_name_map", fake_map)
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(S, "_app_price", fake_app_price)
+    out = run(S.steam_discover(S.DiscoverInput(
+        steamid="76561197960287930", response_format="json")))
+    d = json.loads(out)
+    assert d["personalized"] is True
+    assert d["taste_tags"] == ["Roguelike", "Action RPG"]   # derived from Hades
+    assert "Hades" in d["seed_games"]
+    assert d["filters"]["resolved_tag_ids"] == [1716, 4231]  # seeded from taste
+    assert 99 not in [r["appid"] for r in d["results"]]     # owned game excluded
+    assert [r["appid"] for r in d["results"]] == [20, 30]
+
+
+# --------------------------------------------------------------------------- #
 # Tool logic with mocked HTTP
 # --------------------------------------------------------------------------- #
 
@@ -426,6 +534,7 @@ def test_tools_registered():
     assert "steam_get_app_tags" in by_name
     assert "steam_get_rarest_unlocks" in by_name
     assert "steam_find_friends_who_own" in by_name
+    assert "steam_discover" in by_name
     # the reviews tool takes the reviews input (has appid + review_filter),
     # not _fmt_review's raw-dict signature
     schema = json.dumps(by_name["steam_get_app_reviews"].inputSchema)

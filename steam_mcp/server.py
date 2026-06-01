@@ -95,6 +95,7 @@ CACHE_TTL_SCHEMA = 86400        # achievement/stat definitions are static
 CACHE_TTL_GLOBAL_ACH = 3600
 CACHE_TTL_TAGS = 3600           # community tag weights (slow-changing)
 CACHE_TTL_TAGMAP = 86400        # tagid -> name dictionary is effectively static
+CACHE_TTL_DISCOVER = 300        # storefront search results (5 min)
 
 
 class _TTLCache:
@@ -2051,6 +2052,346 @@ async def steam_get_app_tags(params: AppTagsInput) -> str:
                 ", ".join(r["tag"] for r in rows),
             ]
         )
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
+
+
+# --- Discovery: filtered search + optional personalization ------------------
+
+SEARCH_URL = "https://store.steampowered.com/search/results/"
+
+# Friendly sort name -> Steam search sort_by value ("" = let Steam default).
+_SORT_MAP = {
+    "reviews": "Reviews_DESC",
+    "release": "Released_DESC",
+    "price_asc": "Price_ASC",
+    "price_desc": "Price_DESC",
+    "relevance": "",
+}
+
+
+async def _resolve_tag_ids(names: list[str]) -> tuple[list[int], list[str]]:
+    """Resolve community tag NAMES to Steam tag IDs via the cached dictionary.
+
+    Returns (ids, unresolved_names); case-insensitive.
+    """
+    if not names:
+        return [], []
+    name_map = await _tag_name_map()  # {tagid: name}
+    rev = {(nm or "").lower(): tid for tid, nm in name_map.items()}
+    ids, missing = [], []
+    for n in names:
+        tid = rev.get(n.strip().lower())
+        if tid is not None:
+            ids.append(tid)
+        else:
+            missing.append(n)
+    return ids, missing
+
+
+async def _items_tags(appids: list[int]) -> dict:
+    """One GetItems call -> {appid: [{tagid, weight}, ...]} for many apps (no key)."""
+    if not appids:
+        return {}
+    body = {
+        "ids": [{"appid": a} for a in appids],
+        "context": {"language": "english", "country_code": "US", "steam_realm": 1},
+        "data_request": {"include_tag_count": 20},
+    }
+    data = await _steam_get(
+        "IStoreBrowseService/GetItems/v1/",
+        {"input_json": json.dumps(body, separators=(",", ":"))},
+        with_key=False,
+        cache_ttl=CACHE_TTL_TAGS,
+    )
+    out = {}
+    for it in (data.get("response") or {}).get("store_items", []):
+        out[it.get("appid")] = it.get("tags") or []
+    return out
+
+
+async def _taste_profile(sid: str, max_seed: int = 12, top_tags: int = 5) -> dict:
+    """Build a taste profile from a user's recent + most-played games.
+
+    Returns {owned_ids, tag_ids, tag_names, seed_games}: the games the user owns
+    (for exclusion), and the top community tags aggregated by weight across their
+    seed games (one batched GetItems call).
+    """
+    owned_d, recent_d = await asyncio.gather(
+        _steam_get(
+            "IPlayerService/GetOwnedGames/v1/",
+            {"steamid": sid, "include_appinfo": 1, "include_played_free_games": 1},
+        ),
+        _steam_get("IPlayerService/GetRecentlyPlayedGames/v1/", {"steamid": sid}),
+    )
+    games = owned_d.get("response", {}).get("games", []) or []
+    owned_ids = {g.get("appid") for g in games}
+    name_by_id = {g.get("appid"): g.get("name") for g in games}
+    by_play = sorted(
+        (g for g in games if g.get("playtime_forever", 0) > 0),
+        key=lambda g: g.get("playtime_forever", 0), reverse=True,
+    )
+    recent = recent_d.get("response", {}).get("games", []) or []
+    for g in recent:
+        name_by_id.setdefault(g.get("appid"), g.get("name"))
+
+    # Seed from recent games (current taste) first, then most-played.
+    seed: list[int] = []
+    for g in recent + by_play:
+        a = g.get("appid")
+        if a and a not in seed:
+            seed.append(a)
+        if len(seed) >= max_seed:
+            break
+    if not seed:
+        return {"owned_ids": owned_ids, "tag_ids": [], "tag_names": [], "seed_games": []}
+
+    tags_by_app = await _items_tags(seed)
+    weights: dict[int, float] = {}
+    for a in seed:
+        for t in tags_by_app.get(a, []):
+            try:
+                tid = int(t.get("tagid"))
+            except (TypeError, ValueError):
+                continue
+            weights[tid] = weights.get(tid, 0) + (t.get("weight") or 1)
+    top = sorted(weights.items(), key=lambda kv: kv[1], reverse=True)[:top_tags]
+    name_map = await _tag_name_map()
+    tag_ids = [tid for tid, _ in top]
+    tag_names = [name_map[tid] for tid, _ in top if name_map.get(tid)]
+    display = [g.get("name") for g in by_play[:5]] or [name_by_id.get(a) for a in seed[:5]]
+    return {
+        "owned_ids": owned_ids,
+        "tag_ids": tag_ids,
+        "tag_names": tag_names,
+        "seed_games": [n for n in display if n],
+    }
+
+
+async def _discover_appids(query: dict) -> tuple[list[int], int]:
+    """Run the storefront search; return (ranked_appids, total_count).
+
+    The store search returns rendered HTML, so we pull the ranked app IDs from the
+    stable `data-ds-appid` attribute on each result row. Guarded: an empty/garbled
+    response simply yields no IDs.
+    """
+    data = await _raw_get(SEARCH_URL, query, cache_ttl=CACHE_TTL_DISCOVER)
+    if not isinstance(data, dict):
+        return [], 0
+    html = data.get("results_html") or ""
+    ids: list[int] = []
+    seen = set()
+    for m in re.finditer(r'data-ds-appid="(\d+)', html):
+        a = int(m.group(1))
+        if a not in seen:
+            seen.add(a)
+            ids.append(a)
+    return ids, data.get("total_count", len(ids))
+
+
+class DiscoverInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    term: Optional[str] = Field(
+        default=None, description="Optional free-text title/keyword to search.",
+        max_length=200,
+    )
+    tags: list[str] = Field(
+        default_factory=list,
+        description="Community tag names to require (AND), e.g. "
+        "['Roguelike', 'Co-op']. Resolved to Steam tag IDs; unknown names are "
+        "reported and ignored.",
+        max_length=10,
+    )
+    max_price: Optional[int] = Field(
+        default=None,
+        description="Maximum price in the country's currency units (e.g. 30 = $30 "
+        "for country_code='us'). Omit for any price.",
+        ge=0, le=1000,
+    )
+    on_sale: bool = Field(default=False, description="Only games currently on sale.")
+    platform: Optional[str] = Field(
+        default=None, description="Filter by OS: 'win', 'mac', or 'linux'.",
+    )
+    sort: str = Field(
+        default="reviews",
+        description="Order: 'reviews' (best-reviewed first, default), 'release' "
+        "(newest), 'price_asc', 'price_desc', or 'relevance'.",
+    )
+    steamid: Optional[str] = Field(
+        default=None,
+        description="Optional. If set, personalize: seed tags from this user's "
+        "most-played + recently-played games and (by default) exclude games they "
+        "own. SteamID64, vanity name, or profile URL.",
+        max_length=200,
+    )
+    exclude_owned: bool = Field(
+        default=True,
+        description="When steamid is set, hide games the user already owns.",
+    )
+    limit: int = Field(
+        default=15, description="Max results to return (1-50).", ge=1, le=50
+    )
+    country_code: str = Field(default="us", min_length=2, max_length=2)
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+    @field_validator("platform")
+    @classmethod
+    def _check_platform(cls, v):
+        if v is None:
+            return v
+        v = v.lower().strip()
+        if v not in {"win", "mac", "linux"}:
+            raise ValueError("platform must be 'win', 'mac', or 'linux'")
+        return v
+
+    @field_validator("sort")
+    @classmethod
+    def _check_sort(cls, v):
+        v = v.lower().strip()
+        allowed = {"reviews", "release", "price_asc", "price_desc", "relevance"}
+        if v not in allowed:
+            raise ValueError(f"sort must be one of {sorted(allowed)}")
+        return v
+
+
+@mcp.tool(
+    name="steam_discover",
+    annotations={
+        "title": "Discover / Recommend Steam Games",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def steam_discover(params: DiscoverInput) -> str:
+    """Find games by filters (tags, price, sale, platform) — and optionally recommend.
+
+    The discovery/recommendation tool. Filters the whole store by community tags
+    (by name), max price, on-sale, platform, and free text, sorted by review score
+    (default), recency, or price. Pass a steamid to PERSONALIZE: it seeds the tag
+    filter from that user's most-played + recently-played games and, by default,
+    excludes games they already own — so it recommends NEW games matching their
+    taste. Answers "find co-op roguelikes under $20" and "what should I play next".
+    The search needs no API key; personalization needs one and a public profile.
+
+    Args:
+        params (DiscoverInput): term, tags, max_price, on_sale, platform, sort,
+            steamid, exclude_owned, limit, country_code.
+
+    Returns:
+        str: Markdown or JSON. The applied filters (incl. any derived taste tags),
+        the match total_count, and a ranked list (appid, name, price, on_sale).
+    """
+    try:
+        cc = params.country_code
+        tag_ids, missing = await _resolve_tag_ids(params.tags)
+
+        owned_ids: set = set()
+        taste_tags: list[str] = []
+        seed_games: list[str] = []
+        if params.steamid:
+            sid = await _resolve_steamid(params.steamid)
+            taste = await _taste_profile(sid)
+            if params.exclude_owned:
+                owned_ids = {a for a in taste["owned_ids"] if a}
+            seed_games = taste["seed_games"]
+            if not tag_ids and taste["tag_ids"]:   # seed tags only if none given
+                tag_ids = taste["tag_ids"]
+                taste_tags = taste["tag_names"]
+
+        query = {
+            "json": 1, "infinite": 1, "cc": cc, "l": "english",
+            "category1": 998,                       # games only
+            "start": 0, "count": 100,
+        }
+        if params.term:
+            query["term"] = params.term
+        if tag_ids:
+            query["tags"] = ",".join(str(t) for t in tag_ids)
+        if params.max_price is not None:
+            query["maxprice"] = str(params.max_price)
+        if params.on_sale:
+            query["specials"] = 1
+        if params.platform:
+            query["os"] = params.platform
+        sort_by = _SORT_MAP.get(params.sort, "Reviews_DESC")
+        if sort_by:
+            query["sort_by"] = sort_by
+
+        appids, total = await _discover_appids(query)
+        appids = [a for a in appids if a not in owned_ids]
+        page = appids[: params.limit]
+        infos = await _gather_limited([_app_price(a, cc) for a in page]) if page else []
+        rows = []
+        for a, info in zip(page, infos, strict=True):
+            rows.append({
+                "appid": a,
+                "name": info.get("name") or f"app {a}",
+                "price": info.get("price"),
+                "discount_pct": info.get("discount_pct", 0),
+                "on_sale": info.get("on_sale", False),
+            })
+
+        excluded = len(owned_ids) if (params.steamid and params.exclude_owned) else 0
+        if params.response_format == ResponseFormat.JSON:
+            return _dump({
+                "filters": {
+                    "term": params.term,
+                    "tags": params.tags,
+                    "resolved_tag_ids": tag_ids,
+                    "unresolved_tags": missing,
+                    "max_price": params.max_price,
+                    "on_sale": params.on_sale,
+                    "platform": params.platform,
+                    "sort": params.sort,
+                },
+                "personalized": bool(params.steamid),
+                "seed_games": seed_games,
+                "taste_tags": taste_tags,
+                "excluded_owned": excluded,
+                "total_count": total,
+                "count": len(rows),
+                "results": rows,
+            })
+
+        bits = []
+        if params.term:
+            bits.append(f"'{params.term}'")
+        if params.tags:
+            bits.append("tags: " + ", ".join(params.tags))
+        if params.max_price is not None:
+            bits.append(f"<= {params.max_price} {cc.upper()}")
+        if params.on_sale:
+            bits.append("on sale")
+        if params.platform:
+            bits.append(params.platform)
+        lines = [
+            f"# Discover: {', '.join(bits) if bits else 'top games'}",
+            f"Matched {total:,} games; showing {len(rows)} (sorted by {params.sort}).",
+        ]
+        if params.steamid and seed_games:
+            extra = f" -> tags: {', '.join(taste_tags)}" if taste_tags else ""
+            lines.append(
+                f"Personalized from your most-played ({', '.join(seed_games)}){extra}."
+            )
+            if excluded:
+                lines.append(f"Excluding {excluded:,} games you own.")
+        if missing:
+            lines.append(f"(couldn't resolve tags: {', '.join(missing)})")
+        lines.append("")
+        for r in rows:
+            if r["on_sale"]:
+                tail = f" - 🔖 {r['price']} (-{r['discount_pct']}%)"
+            elif r["price"]:
+                tail = f" - {r['price']}"
+            else:
+                tail = ""
+            lines.append(f"- **{r['name']}** (appid {r['appid']}){tail}")
+        if not rows:
+            lines.append("(no matches — try loosening the filters)")
+        return "\n".join(lines)
     except Exception as e:  # noqa: BLE001
         return _handle_error(e)
 
