@@ -51,6 +51,7 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_get_player_summary` | Status (Online/Away/In-Game…), current game, for 1–100 users | yes |
 | `steam_get_friend_list` | Friends enriched with name + live status | yes |
 | `steam_find_friends_who_own` | **Which friends own (or are playing) a game** — "who can I play X with" | yes |
+| `steam_get_user_groups` | The Steam groups/clans a user is in (name, URL, member count) | yes |
 | `steam_plan_coop_night` | **Co-op games the host + friends all own**, ranked by owners, with who's online now | yes |
 | `steam_get_owned_games` | Owned games with total/recent hours (sortable) | yes |
 | `steam_analyze_library` | **Backlog, playtime distribution, abandoned games** across a whole library | yes |
@@ -68,6 +69,8 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_recommend` | **Recommend games** like a seed game or your taste, with the shared tags as the "why" | no* |
 | `steam_get_app_details` | **Full store details** — play modes/co-op, controller, DLC, languages, requirements, Metacritic | no |
 | `steam_get_dlc` | **A game's DLC**, with live prices and what's on sale | no |
+| `steam_get_app_regional_pricing` | A game's price **across regions** (each in local currency) | no |
+| `steam_get_workshop_item` | **Workshop item** metadata (game, tags, subscribers, favorites, views) | no |
 | `steam_get_app_tags` | **A game's top community tags** (Souls-like, Roguelike, Cozy…) | no |
 | `steam_get_app_reviews` | Lifetime verdict, +/- counts, sample reviews; optional **recent (last-N-days) score** via `review_filter='recent'` | no |
 | `steam_get_featured_specials` | Games currently on sale (regional) | no |

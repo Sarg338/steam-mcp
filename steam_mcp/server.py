@@ -112,6 +112,8 @@ CACHE_TTL_TAGMAP = 86400        # tagid -> name dictionary is effectively static
 CACHE_TTL_DISCOVER = 300        # storefront search results (5 min)
 CACHE_TTL_NEWS = 900            # news / patch notes change slowly (15 min)
 CACHE_TTL_REVIEWS = 300         # lifetime review summary (5 min)
+CACHE_TTL_WORKSHOP = 3600       # workshop item metadata (slow-changing)
+CACHE_TTL_GROUP = 3600          # group name / url / member count (slow-changing)
 
 
 class _TTLCache:
@@ -312,6 +314,44 @@ async def _raw_get(url: str, params: dict[str, Any], cache_ttl: float = 0) -> An
     if ck is not None:
         _CACHE.set(ck, data, cache_ttl)
     return data
+
+
+async def _raw_get_text(url: str, params: dict[str, Any] | None = None,
+                        cache_ttl: float = 0) -> str:
+    """GET a public endpoint and return the raw text body (e.g. community XML)."""
+    params = params or {}
+    ck = _cache_key("text:" + url, params) if cache_ttl else None
+    if ck is not None:
+        hit = _CACHE.get(ck)
+        if hit is not None:
+            return hit
+    client = _http_client()
+    resp = await _get_with_retry(client, url, params, HTTP_TIMEOUT)
+    text = resp.text
+    if ck is not None:
+        _CACHE.set(ck, text, cache_ttl)
+    return text
+
+
+async def _steam_post(path: str, data: dict[str, Any], *, with_key: bool = False,
+                      cache_ttl: float = 0) -> dict:
+    """POST to a Steam Web API endpoint (some, e.g. GetPublishedFileDetails, are
+    POST-only) and return parsed JSON. Caches static responses like _steam_get."""
+    body = dict(data)
+    if with_key:
+        body["key"] = _get_api_key()
+    ck = _cache_key("post:" + API_BASE + "/" + path, body) if cache_ttl else None
+    if ck is not None:
+        hit = _CACHE.get(ck)
+        if hit is not None:
+            return hit
+    client = _http_client()
+    resp = await client.post(f"{API_BASE}/{path}", data=body, timeout=HTTP_TIMEOUT)
+    resp.raise_for_status()
+    out = resp.json()
+    if ck is not None:
+        _CACHE.set(ck, out, cache_ttl)
+    return out
 
 
 def _handle_error(e: Exception) -> str:
@@ -4093,6 +4133,275 @@ async def steam_plan_coop_night(params: PlanCoopNightInput) -> str:
         else:
             lines.append("No co-op games shared across the group "
                          "(everyone owns different things, or libraries are private).")
+        return "\n".join(lines)
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
+
+
+# ---------------------------------------------------------------------------
+# Tools: regional pricing, workshop items, user groups
+# ---------------------------------------------------------------------------
+
+class RegionalPricingInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    appid: int = Field(..., description="Steam application (game) ID.", ge=1)
+    countries: list[str] = Field(
+        default_factory=lambda: ["us", "gb", "de", "br", "jp", "au", "ca", "in"],
+        description="ISO country codes to price in (2 letters each, max 20). Prices "
+        "are returned in each region's own currency.",
+        max_length=20,
+    )
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+    @field_validator("countries")
+    @classmethod
+    def _check_countries(cls, v):
+        out = []
+        for c in v:
+            c = c.strip().lower()
+            if len(c) != 2:
+                raise ValueError("each country code must be 2 letters")
+            out.append(c)
+        return out or ["us"]
+
+
+@mcp.tool(
+    name="steam_get_app_regional_pricing",
+    annotations={
+        "title": "Get Steam Regional Pricing",
+        "readOnlyHint": True, "destructiveHint": False,
+        "idempotentHint": True, "openWorldHint": True,
+    },
+)
+async def steam_get_app_regional_pricing(params: RegionalPricingInput) -> str:
+    """Compare a game's price across regions (each in its own local currency).
+
+    Fetches the store price for the same app in several countries at once. Note the
+    amounts are in different currencies (USD, EUR, BRL, JPY, …), so they are NOT
+    directly comparable without an exchange rate — this shows each region's local
+    price and discount, not a converted ranking. No API key required.
+
+    Args:
+        params (RegionalPricingInput): appid, countries.
+
+    Returns:
+        str: Markdown or JSON. game name plus, per country, the localized price,
+        discount, and on-sale flag.
+    """
+    try:
+        infos = await _gather_limited(
+            [_app_price(params.appid, cc) for cc in params.countries]
+        )
+        name = next((i.get("name") for i in infos if i.get("name")),
+                    f"app {params.appid}")
+        rows = []
+        for cc, info in zip(params.countries, infos, strict=True):
+            rows.append({
+                "country": cc,
+                "is_free": info.get("is_free", False),
+                "price": info.get("price"),
+                "discount_pct": info.get("discount_pct", 0),
+                "on_sale": info.get("on_sale", False),
+            })
+        if params.response_format == ResponseFormat.JSON:
+            return _dump({"appid": params.appid, "name": name, "prices": rows})
+
+        lines = [f"# Regional pricing: {name} (appid {params.appid})",
+                 "_Each price is in that region's own currency._", ""]
+        for r in rows:
+            if r["price"]:
+                tail = f" (-{r['discount_pct']}%)" if r["on_sale"] else ""
+                lines.append(f"- **{r['country'].upper()}**: {r['price']}{tail}")
+            else:
+                lines.append(f"- **{r['country'].upper()}**: n/a (not sold / no price)")
+        return "\n".join(lines)
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
+
+
+class WorkshopItemInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    published_file_id: int = Field(
+        ..., ge=1,
+        description="Steam Workshop published file ID (the ?id= number in the "
+        "item's community URL).",
+    )
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+@mcp.tool(
+    name="steam_get_workshop_item",
+    annotations={
+        "title": "Get Steam Workshop Item",
+        "readOnlyHint": True, "destructiveHint": False,
+        "idempotentHint": True, "openWorldHint": True,
+    },
+)
+async def steam_get_workshop_item(params: WorkshopItemInput) -> str:
+    """Get metadata for a Steam Workshop item (mod, map, guide, collection, …).
+
+    Answers "what is this workshop item" and "how popular is it". Returns the title,
+    which game it's for, description, tags, and engagement (subscribers, favorites,
+    views), plus created/updated dates. No API key required.
+
+    Args:
+        params (WorkshopItemInput): published_file_id.
+
+    Returns:
+        str: Markdown or JSON. title, app_id, creator, description, tags,
+        subscriptions/favorited/views, created/updated, and the community link.
+    """
+    try:
+        data = await _steam_post(
+            "ISteamRemoteStorage/GetPublishedFileDetails/v1/",
+            {"itemcount": 1, "publishedfileids[0]": params.published_file_id},
+            cache_ttl=CACHE_TTL_WORKSHOP,
+        )
+        items = data.get("response", {}).get("publishedfiledetails", [])
+        if not items or items[0].get("result") != 1:
+            return f"No Workshop item found for id {params.published_file_id}."
+        d = items[0]
+        summary = {
+            "published_file_id": params.published_file_id,
+            "title": d.get("title"),
+            "app_id": d.get("consumer_app_id"),
+            "creator_steamid": d.get("creator"),
+            "description": _strip_html(d.get("description"), 600),
+            "tags": [t.get("tag") for t in d.get("tags", []) if t.get("tag")],
+            "subscriptions": int(d.get("subscriptions") or 0),
+            "lifetime_subscriptions": int(d.get("lifetime_subscriptions") or 0),
+            "favorited": int(d.get("favorited") or 0),
+            "views": int(d.get("views") or 0),
+            "file_size": int(d.get("file_size") or 0),
+            "created": _ts_to_date(d.get("time_created")),
+            "updated": _ts_to_date(d.get("time_updated")),
+            "banned": bool(d.get("banned")),
+            "preview_url": d.get("preview_url"),
+            "url": "https://steamcommunity.com/sharedfiles/filedetails/?id="
+                   f"{params.published_file_id}",
+        }
+        if params.response_format == ResponseFormat.JSON:
+            return _dump(summary)
+
+        lines = [
+            f"# Workshop: {summary['title'] or params.published_file_id} "
+            f"(id {params.published_file_id})",
+            f"- **For app**: {summary['app_id']}",
+            f"- **Subscribers**: {summary['subscriptions']:,}"
+            + (f" (lifetime {summary['lifetime_subscriptions']:,})"
+               if summary['lifetime_subscriptions'] else ""),
+            f"- **Favorited**: {summary['favorited']:,}  |  "
+            f"**Views**: {summary['views']:,}",
+        ]
+        if summary["tags"]:
+            lines.append(f"- **Tags**: {', '.join(summary['tags'])}")
+        if summary["created"]:
+            upd = f", updated {summary['updated']}" if summary["updated"] else ""
+            lines.append(f"- **Created**: {summary['created']}{upd}")
+        if summary["banned"]:
+            lines.append("- ⚠️ This item is banned.")
+        lines.append(f"- **Link**: {summary['url']}")
+        if summary["description"]:
+            lines += ["", summary["description"]]
+        return "\n".join(lines)
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
+
+
+class UserGroupsInput(PlayerInput):
+    limit: int = Field(
+        default=20, ge=1, le=100,
+        description="Max groups to return; each enriched group is one extra lookup.",
+    )
+    enrich: bool = Field(
+        default=True,
+        description="Fetch each group's name, URL, and member count. Set false for "
+        "a fast group-ID-only list.",
+    )
+
+
+async def _group_details(gid: str) -> dict:
+    """Fetch a Steam group's name/url/member-count from its community memberlist XML."""
+    fallback = {"gid": gid, "name": None,
+                "url": f"https://steamcommunity.com/gid/{gid}", "member_count": None}
+    try:
+        xml = await _raw_get_text(
+            f"https://steamcommunity.com/gid/{gid}/memberslistxml/",
+            {"xml": 1}, cache_ttl=CACHE_TTL_GROUP,
+        )
+    except Exception:  # noqa: BLE001
+        return fallback
+
+    def _cdata(tag):
+        m = re.search(rf"<{tag}><!\[CDATA\[(.*?)\]\]></{tag}>", xml, re.S)
+        return m.group(1).strip() if m else None
+
+    vanity = _cdata("groupURL")
+    mc = re.search(r"<memberCount>(\d+)</memberCount>", xml)
+    return {
+        "gid": gid,
+        "name": _cdata("groupName"),
+        "url": (f"https://steamcommunity.com/groups/{vanity}" if vanity
+                else f"https://steamcommunity.com/gid/{gid}"),
+        "member_count": int(mc.group(1)) if mc else None,
+    }
+
+
+@mcp.tool(
+    name="steam_get_user_groups",
+    annotations={
+        "title": "Get Steam User Groups",
+        "readOnlyHint": True, "destructiveHint": False,
+        "idempotentHint": True, "openWorldHint": True,
+    },
+)
+async def steam_get_user_groups(params: UserGroupsInput) -> str:
+    """List the Steam groups (communities/clans) a user belongs to.
+
+    GetUserGroupList returns only group IDs, so with enrich=true each is resolved to
+    its name, community URL, and member count (sorted by size). Requires the
+    profile's group list to be Public. Needs an API key.
+
+    Args:
+        params (UserGroupsInput): steamid, limit, enrich.
+
+    Returns:
+        str: Markdown or JSON. total group count plus, per group, gid and (when
+        enriched) name, url, and member_count.
+    """
+    try:
+        sid = await _resolve_steamid(params.steamid)
+        data = await _steam_get("ISteamUser/GetUserGroupList/v1/", {"steamid": sid})
+        resp = data.get("response", {})
+        if not resp.get("success"):
+            return "No group data returned (the profile is likely private)."
+        gids = [g.get("gid") for g in resp.get("groups", []) if g.get("gid")]
+        if not gids:
+            return f"{sid} is not in any public Steam groups."
+        total = len(gids)
+        page = gids[: params.limit]
+        if params.enrich:
+            groups = await _gather_limited([_group_details(g) for g in page])
+            groups.sort(key=lambda d: d.get("member_count") or 0, reverse=True)
+        else:
+            groups = [{"gid": g, "name": None,
+                       "url": f"https://steamcommunity.com/gid/{g}",
+                       "member_count": None} for g in page]
+
+        if params.response_format == ResponseFormat.JSON:
+            return _dump({"steamid": sid, "total": total,
+                          "count": len(groups), "groups": groups})
+
+        lines = [f"# Steam groups for {sid}",
+                 f"In {total} group(s); showing {len(groups)}.", ""]
+        for d in groups:
+            if d.get("name"):
+                mc = f" ({d['member_count']:,} members)" if d.get("member_count") else ""
+                lines.append(f"- **{d['name']}**{mc} — {d['url']}")
+            else:
+                lines.append(f"- gid {d['gid']} — {d['url']}")
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001
         return _handle_error(e)

@@ -3,6 +3,17 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.0]
+
+### Added
+- `steam_get_app_regional_pricing` — a game's price across multiple countries at
+  once, each in its own local currency (not converted — regions use different
+  currencies). No API key.
+- `steam_get_workshop_item` — metadata for a Steam Workshop item (title, game,
+  description, tags, subscribers / favorites / views, created/updated). No API key.
+- `steam_get_user_groups` — the Steam groups/clans a user belongs to; group IDs are
+  enriched with name, community URL, and member count (sorted by size).
+
 ## [1.0.0]
 
 First stable release. The public surface — tool names + input parameters, JSON
@@ -176,6 +187,7 @@ changes will require a 2.0.
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[1.1.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.0.0
 [0.12.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.12.0
 [0.11.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.11.0

@@ -515,6 +515,92 @@ def test_get_with_retry_gives_up(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# 1.1.0: regional pricing, workshop items, user groups
+# --------------------------------------------------------------------------- #
+
+def test_regional_pricing(monkeypatch):
+    prices = {
+        "us": {"name": "G", "price": "$10", "discount_pct": 0, "on_sale": False},
+        "de": {"name": "G", "price": "9,99€", "discount_pct": 0, "on_sale": False},
+        "br": {"name": "G", "price": "R$ 50", "discount_pct": 50, "on_sale": True},
+    }
+
+    async def fake_app_price(appid, cc):
+        return prices[cc]
+
+    monkeypatch.setattr(S, "_app_price", fake_app_price)
+    out = run(S.steam_get_app_regional_pricing(S.RegionalPricingInput(
+        appid=5, countries=["us", "de", "br"], response_format="json")))
+    d = json.loads(out)
+    assert d["name"] == "G"
+    assert {p["country"]: p["price"] for p in d["prices"]} == {
+        "us": "$10", "de": "9,99€", "br": "R$ 50"}
+    assert [p for p in d["prices"] if p["country"] == "br"][0]["on_sale"] is True
+
+
+def test_workshop_item(monkeypatch):
+    async def fake_post(path, data, **k):
+        assert "GetPublishedFileDetails" in path
+        return {"response": {"publishedfiledetails": [{
+            "result": 1, "title": "Move It", "consumer_app_id": 255710,
+            "creator": "123", "description": "<b>A mod</b>",
+            "tags": [{"tag": "Mod"}], "subscriptions": 3432587,
+            "lifetime_subscriptions": 9000000, "favorited": 159078,
+            "views": 2772323, "file_size": 1215506,
+            "time_created": 1547052076, "time_updated": 0, "banned": 0}]}}
+
+    monkeypatch.setattr(S, "_steam_post", fake_post)
+    out = run(S.steam_get_workshop_item(
+        S.WorkshopItemInput(published_file_id=1619685021, response_format="json")))
+    d = json.loads(out)
+    assert d["title"] == "Move It" and d["app_id"] == 255710
+    assert d["subscriptions"] == 3432587 and d["favorited"] == 159078
+    assert d["tags"] == ["Mod"]
+    assert d["description"] == "A mod"          # HTML stripped
+    assert d["created"].startswith("2019-01")   # ts_to_date(1547052076)
+
+
+def test_workshop_item_not_found(monkeypatch):
+    async def fake_post(path, data, **k):
+        return {"response": {"publishedfiledetails": [{"result": 9}]}}
+
+    monkeypatch.setattr(S, "_steam_post", fake_post)
+    out = run(S.steam_get_workshop_item(S.WorkshopItemInput(published_file_id=1)))
+    assert "No Workshop item found" in out
+
+
+def test_user_groups(monkeypatch):
+    async def fake_steam(path, params, **k):
+        return {"response": {"success": True,
+                             "groups": [{"gid": "4"}, {"gid": "5"}]}}
+
+    xmls = {
+        "4": "<memberList><groupDetails><groupName><![CDATA[Valve]]></groupName>"
+             "<groupURL><![CDATA[Valve]]></groupURL>"
+             "<memberCount>152</memberCount></groupDetails></memberList>",
+        "5": "<memberList><groupDetails><groupName><![CDATA[Steam Universe]]>"
+             "</groupName><groupURL><![CDATA[SteamUniverse]]></groupURL>"
+             "<memberCount>5000000</memberCount></groupDetails></memberList>",
+    }
+
+    async def fake_text(url, params=None, cache_ttl=0):
+        gid = url.split("/gid/")[1].split("/")[0]
+        return xmls[gid]
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(S, "_raw_get_text", fake_text)
+    out = run(S.steam_get_user_groups(
+        S.UserGroupsInput(steamid="76561197960287930", response_format="json")))
+    d = json.loads(out)
+    assert d["total"] == 2 and d["count"] == 2
+    # sorted by member_count desc -> Steam Universe first
+    assert d["groups"][0]["name"] == "Steam Universe"
+    assert d["groups"][0]["member_count"] == 5000000
+    assert d["groups"][0]["url"] == "https://steamcommunity.com/groups/SteamUniverse"
+    assert d["groups"][1]["name"] == "Valve"
+
+
+# --------------------------------------------------------------------------- #
 # Tool logic with mocked HTTP
 # --------------------------------------------------------------------------- #
 
@@ -792,6 +878,9 @@ def test_tools_registered():
     assert "steam_should_i_buy" in by_name
     assert "steam_recommend" in by_name
     assert "steam_plan_coop_night" in by_name
+    assert "steam_get_app_regional_pricing" in by_name
+    assert "steam_get_workshop_item" in by_name
+    assert "steam_get_user_groups" in by_name
     # the reviews tool takes the reviews input (has appid + review_filter),
     # not _fmt_review's raw-dict signature
     schema = json.dumps(by_name["steam_get_app_reviews"].inputSchema)
