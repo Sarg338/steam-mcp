@@ -1,6 +1,7 @@
 # NEVER ship secrets or local cruft inside the .mcpb bundle.
 .env
 .env.example
+*.pem
 
 # Python caches / build artifacts
 __pycache__/

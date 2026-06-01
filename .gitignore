@@ -10,6 +10,9 @@ venv/
 .mypy_cache/
 .ruff_cache/
 
+# Signing key material (mcpb sign --self-signed) — never commit private keys
+*.pem
+
 # Packaging outputs (build them on release; don't commit)
 *.mcpb
 _build_out.txt
