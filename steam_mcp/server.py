@@ -3511,7 +3511,10 @@ class LibraryAnalysisInput(BaseModel):
         ge=1, le=50,
     )
     backlog_limit: int = Field(
-        default=25, description="How many never-played games to list (0-100).",
+        default=100,
+        description="How many never-played games to list (0-100). Defaults to the "
+        "max so 'what should I play' sees the whole backlog, not an alphabetical "
+        "slice of it.",
         ge=0, le=100,
     )
     stale_days: int = Field(
@@ -3546,6 +3549,12 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
     games; and 'abandoned' games (played, but not launched within `stale_days`).
     Steam only began recording last-played dates ~2019, so games last played before
     then show 'last played: unknown' rather than a date.
+
+    The backlog is listed **alphabetically** and `backlog_limit` defaults to the
+    100-game maximum, so a recommendation sees the whole backlog rather than an
+    alphabetical slice. If a library has more never-played games than the limit,
+    the output is flagged truncated (`backlog_truncated`) — see the full set before
+    recommending, not just the early letters of the alphabet.
 
     Args:
         params (LibraryAnalysisInput): steamid, top_limit, backlog_limit, stale_days.
@@ -3629,6 +3638,7 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
                 : params.backlog_limit
             ]
         ]
+        backlog_truncated = len(backlog) < len(never)
 
         total_hours = round(total_min / 60, 1)
         summary = {
@@ -3649,6 +3659,7 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
                 "top_played": top_played,
                 "recently_played": recently_played,
                 "backlog_never_played": backlog,
+                "backlog_truncated": backlog_truncated,
                 "abandoned": abandoned,
             })
 
@@ -3666,6 +3677,17 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
             "",
             "## Most played",
         ]
+        if backlog_truncated:
+            if params.backlog_limit < 100:
+                more = "call again with backlog_limit=100 to see more"
+            else:
+                more = ("this is the 100-game max — page the rest via "
+                        "steam_get_owned_games (sort_by=name, offset=...)")
+            lines.insert(
+                3,
+                f"- ⚠️ **Backlog truncated**: showing {len(backlog)} of "
+                f"{len(never)} never-played (alphabetical); {more}.",
+            )
         for g in top_played:
             lp = f", last played {g['last_played']}" if g["last_played"] else ""
             lines.append(f"- **{g['name']}** — {g['hours']}h{lp}")

@@ -776,6 +776,38 @@ def test_analyze_library(monkeypatch):
     assert d["playtime_buckets"]["0h"] == 1
 
 
+def test_analyze_library_backlog_truncation(monkeypatch):
+    # 5 never-played games, alphabetical A..E; a small backlog_limit must flag
+    # truncation and only show the early letters (the bug the chat surfaced).
+    games = [
+        {"appid": i, "name": ch, "playtime_forever": 0, "rtime_last_played": 0}
+        for i, ch in enumerate("ABCDE", start=1)
+    ]
+    payload = {"response": {"game_count": 5, "games": games}}
+
+    async def fake_steam(path, params, **k):
+        return payload
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+
+    # Truncated: ask for 3 of 5 -> alphabetical slice A,B,C + truncation flag.
+    out = run(S.steam_analyze_library(S.LibraryAnalysisInput(
+        steamid="76561197960287930", backlog_limit=3, response_format="json")))
+    d = json.loads(out)
+    assert d["backlog_truncated"] is True
+    assert [g["name"] for g in d["backlog_never_played"]] == ["A", "B", "C"]
+
+    md = run(S.steam_analyze_library(S.LibraryAnalysisInput(
+        steamid="76561197960287930", backlog_limit=3)))
+    assert "Backlog truncated" in md and "showing 3 of 5" in md
+
+    # Default backlog_limit is the 100 max, so a small backlog is NOT truncated.
+    full = run(S.steam_analyze_library(S.LibraryAnalysisInput(
+        steamid="76561197960287930", response_format="json")))
+    assert json.loads(full)["backlog_truncated"] is False
+    assert S.LibraryAnalysisInput(steamid="x").backlog_limit == 100
+
+
 def test_app_details_features(monkeypatch):
     data = {"123": {"success": True, "data": {
         "name": "Game", "type": "game", "is_free": False,

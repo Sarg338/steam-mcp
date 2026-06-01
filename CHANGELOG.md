@@ -3,6 +3,19 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.3]
+
+### Fixed
+- **`steam_analyze_library` no longer recommends from an alphabetical slice of the
+  backlog.** The never-played list is sorted A–Z, and `backlog_limit` defaulted to
+  25 — so on a 100+ game backlog the model only ever saw the early letters (e.g. it
+  could recommend a game starting with "B" while never seeing Skyrim or Titan
+  Quest). `backlog_limit` now defaults to the **100-game maximum**, and when the
+  backlog still overflows the output is explicitly flagged truncated (a new
+  `backlog_truncated` field in JSON and a ⚠️ line in Markdown) telling the caller to
+  see the full set before recommending. Additive/behavior-only — no schema or field
+  removals, so it stays within the 1.x stability contract.
+
 ## [1.4.2]
 
 ### Fixed
@@ -248,6 +261,7 @@ changes will require a 2.0.
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[1.4.3]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.4.3
 [1.4.2]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.4.2
 [1.4.1]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.4.1
 [1.4.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.4.0
