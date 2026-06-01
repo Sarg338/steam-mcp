@@ -3,6 +3,19 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.10.0]
+
+### Added
+- `steam_should_i_buy` — a one-call **buying brief**: current price/discount,
+  **lifetime AND last-30-days** review scores (with the trend between them), top
+  community tags, Metacritic, and release status. Pass a `steamid` to add whether
+  you already own it and which tags match your most-played games. Surfaces the
+  facts for a reasoned call rather than hard-coding a verdict.
+- `steam_recommend` — recommends games similar to a **seed game** ("like Hades"),
+  to your **taste** (`steamid` → most-played + recent), or to explicit **tags** —
+  excluding the seed and games you own, and explaining WHY each matches (the
+  shared community tags). Ranked by tag overlap.
+
 ## [0.9.0]
 
 ### Added
@@ -118,6 +131,7 @@ All notable changes to this project are documented here. Versions follow
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[0.10.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.10.0
 [0.9.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.9.0
 [0.8.1]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.8.1
 [0.8.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.8.0

@@ -3488,6 +3488,311 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
         return _handle_error(e)
 
 
+# ---------------------------------------------------------------------------
+# Tools: intelligence (composite decision + recommendation helpers)
+# ---------------------------------------------------------------------------
+
+class ShouldIBuyInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    appid: int = Field(..., description="Steam application (game) ID to evaluate.", ge=1)
+    steamid: Optional[str] = Field(
+        default=None, max_length=200,
+        description="Optional: personalize — whether you already own it and how its "
+        "tags match your most-played games. SteamID64, vanity, or profile URL.",
+    )
+    country_code: str = Field(default="us", min_length=2, max_length=2)
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+@mcp.tool(
+    name="steam_should_i_buy",
+    annotations={
+        "title": "Steam Buying Brief (Should I Buy?)",
+        "readOnlyHint": True, "destructiveHint": False,
+        "idempotentHint": True, "openWorldHint": True,
+    },
+)
+async def steam_should_i_buy(params: ShouldIBuyInput) -> str:
+    """Gather everything needed to decide whether to buy a game, in one call.
+
+    Fuses the decision-relevant signals: current price/discount, lifetime AND
+    last-30-days review scores (the divergence shows whether a game is improving or
+    declining), top community tags, Metacritic, and release status. Pass a steamid
+    to personalize — whether you already own it and which of its tags match your
+    most-played games. Returns the facts for a reasoned call (it does not hard-code
+    a yes/no). The store data needs no API key; personalization does.
+
+    Args:
+        params (ShouldIBuyInput): appid, steamid, country_code.
+
+    Returns:
+        str: Markdown brief or JSON — price, reviews (lifetime + recent + trend),
+        tags, metacritic, and (if steamid) ownership + taste match.
+    """
+    try:
+        cc = params.country_code
+        details, rev, tags_map = await asyncio.gather(
+            _store_get("appdetails", {"appids": params.appid, "cc": cc, "l": "english"},
+                       cache_ttl=CACHE_TTL_APPDETAILS),
+            _raw_get(f"https://store.steampowered.com/appreviews/{params.appid}",
+                     {"json": 1, "filter": "all", "language": "english",
+                      "review_type": "all", "purchase_type": "all",
+                      "num_per_page": 0, "cc": cc}),
+            _items_tags([params.appid]),
+        )
+        entry = details.get(str(params.appid), {}) if isinstance(details, dict) else {}
+        if not entry.get("success"):
+            return f"No store details found for app {params.appid}."
+        d = entry.get("data", {})
+        name = d.get("name") or str(params.appid)
+        price = d.get("price_overview") or {}
+        is_free = d.get("is_free", False)
+        rel = d.get("release_date") or {}
+
+        summ = rev.get("query_summary", {}) if isinstance(rev, dict) else {}
+        l_pos, l_neg = summ.get("total_positive", 0), summ.get("total_negative", 0)
+        l_pct = round(100 * l_pos / (l_pos + l_neg), 1) if (l_pos + l_neg) else None
+        window, capped = await _collect_recent_reviews(params.appid, 30, cc)
+        r_n = len(window)
+        r_pct = round(100 * sum(1 for r in window if r.get("voted_up")) / r_n, 1) if r_n else None
+        trend = round(r_pct - l_pct, 1) if (r_pct is not None and l_pct is not None) else None
+
+        name_map = await _tag_name_map()
+        top_tag_ids, top_tags = [], []
+        for t in (tags_map.get(params.appid, []) or [])[:8]:
+            try:
+                tid = int(t.get("tagid"))
+            except (TypeError, ValueError):
+                continue
+            top_tag_ids.append(tid)
+            if name_map.get(tid):
+                top_tags.append(name_map[tid])
+
+        personal = None
+        if params.steamid:
+            sid = await _resolve_steamid(params.steamid)
+            taste = await _taste_profile(sid)
+            taste_set = set(taste["tag_ids"])
+            personal = {
+                "already_owns": params.appid in taste["owned_ids"],
+                "taste_match_tags": [name_map[t] for t in top_tag_ids
+                                     if t in taste_set and name_map.get(t)],
+                "your_top_tags": taste["tag_names"],
+            }
+
+        summary = {
+            "appid": params.appid, "name": name, "is_free": is_free,
+            "price": price.get("final_formatted") or ("Free" if is_free else None),
+            "initial_price": price.get("initial_formatted") or None,
+            "discount_pct": price.get("discount_percent", 0),
+            "released": rel.get("date"), "coming_soon": rel.get("coming_soon", False),
+            "genres": [g.get("description") for g in d.get("genres", [])],
+            "metacritic": (d.get("metacritic") or {}).get("score"),
+            "review_lifetime": {"desc": summ.get("review_score_desc"),
+                                "positive_pct": l_pct,
+                                "total": summ.get("total_reviews", 0)},
+            "review_recent_30d": {"positive_pct": r_pct, "reviews_counted": r_n,
+                                  "sampled": capped},
+            "review_trend_pts": trend,
+            "top_tags": top_tags,
+            "personal": personal,
+        }
+        if params.response_format == ResponseFormat.JSON:
+            return _dump(summary)
+
+        price_str = summary["price"] or "Unknown"
+        if summary["discount_pct"]:
+            price_str = (f"{summary['price']} (was {summary['initial_price']}, "
+                         f"-{summary['discount_pct']}%)")
+        lines = [
+            f"# Should I buy: {name} (appid {params.appid})",
+            f"- **Price**: {price_str}"
+            + (" — coming soon" if summary["coming_soon"] else ""),
+            f"- **Released**: {summary['released'] or 'n/a'}  |  "
+            f"**Genres**: {', '.join(g for g in summary['genres'] if g) or 'n/a'}",
+        ]
+        if summary["metacritic"]:
+            lines.append(f"- **Metacritic**: {summary['metacritic']}")
+        lt = summary["review_lifetime"]
+        lines.append(
+            f"- **Reviews (lifetime)**: {lt['desc'] or 'n/a'} — "
+            f"{lt['positive_pct']}% of {lt['total']:,}"
+        )
+        rc = summary["review_recent_30d"]
+        if rc["positive_pct"] is not None:
+            tnote = f" ({'+' if (trend or 0) >= 0 else ''}{trend} pts vs lifetime)" \
+                if trend is not None else ""
+            samp = " [sampled]" if rc["sampled"] else ""
+            lines.append(
+                f"- **Reviews (last 30d)**: {rc['positive_pct']}% of "
+                f"{rc['reviews_counted']}{samp}{tnote}"
+            )
+        if top_tags:
+            lines.append(f"- **Tags**: {', '.join(top_tags)}")
+        if personal:
+            if personal["already_owns"]:
+                lines.append("- ⚠️ **You already own this.**")
+            if personal["taste_match_tags"]:
+                lines.append(
+                    f"- **Matches your taste**: shares "
+                    f"{', '.join(personal['taste_match_tags'])} with your most-played"
+                )
+            elif personal["your_top_tags"]:
+                lines.append(
+                    f"- Your taste leans {', '.join(personal['your_top_tags'])} "
+                    f"(little overlap here)"
+                )
+        return "\n".join(lines)
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
+
+
+class RecommendInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    seed_appid: Optional[int] = Field(
+        default=None, ge=1,
+        description="Recommend games similar to THIS game (by community tags).",
+    )
+    steamid: Optional[str] = Field(
+        default=None, max_length=200,
+        description="Recommend from this user's taste (most-played + recent); also "
+        "excludes games they already own. SteamID64, vanity, or profile URL.",
+    )
+    tags: list[str] = Field(
+        default_factory=list, max_length=10,
+        description="Explicit tag names to base recommendations on. Takes precedence "
+        "over seed_appid/steamid tags if given.",
+    )
+    max_price: Optional[int] = Field(
+        default=None, ge=0, le=1000,
+        description="Optional max price (country's currency units).",
+    )
+    limit: int = Field(default=10, ge=1, le=30, description="Max recommendations (1-30).")
+    country_code: str = Field(default="us", min_length=2, max_length=2)
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+@mcp.tool(
+    name="steam_recommend",
+    annotations={
+        "title": "Recommend Steam Games (with reasons)",
+        "readOnlyHint": True, "destructiveHint": False,
+        "idempotentHint": True, "openWorldHint": True,
+    },
+)
+async def steam_recommend(params: RecommendInput) -> str:
+    """Recommend games similar to a game you love, or to your taste — with reasons.
+
+    Pick a basis: a seed_appid ("games like Hades"), a steamid (your most-played +
+    recent taste), or explicit tags. Finds well-reviewed games that share those
+    tags — excluding the seed game and (with steamid) games you already own — and
+    explains WHY each matches (the shared tags). The store search needs no key;
+    steamid personalization does.
+
+    Args:
+        params (RecommendInput): seed_appid, steamid, tags, max_price, limit, cc.
+
+    Returns:
+        str: Markdown or JSON — the basis plus ranked recommendations (appid, name,
+        price, matching_tags), best tag-overlap first.
+    """
+    try:
+        cc = params.country_code
+        seed_ids: list[int] = []     # full tag set, for scoring overlap
+        filter_ids: list[int] = []   # the AND filter for the store search
+        basis = None
+        exclude: set = set()
+        owned_ids: set = set()
+
+        if params.tags:
+            seed_ids, _ = await _resolve_tag_ids(params.tags)
+            filter_ids = seed_ids[:]
+            basis = "tags: " + ", ".join(params.tags)
+        if params.steamid:
+            sid = await _resolve_steamid(params.steamid)
+            taste = await _taste_profile(sid)
+            owned_ids = {a for a in taste["owned_ids"] if a}
+            if not seed_ids and taste["tag_ids"]:
+                seed_ids = taste["tag_ids"]
+                filter_ids = seed_ids[:3]
+                basis = "your taste (" + ", ".join(taste["seed_games"][:3]) + ")"
+        if not seed_ids and params.seed_appid:
+            tmap = await _items_tags([params.seed_appid])
+            for t in (tmap.get(params.seed_appid, []) or [])[:10]:
+                try:
+                    seed_ids.append(int(t.get("tagid")))
+                except (TypeError, ValueError):
+                    continue
+            filter_ids = seed_ids[:3]
+            info = await _app_price(params.seed_appid, cc)
+            basis = "like " + (info.get("name") or f"app {params.seed_appid}")
+            exclude.add(params.seed_appid)
+
+        if not seed_ids:
+            return ("Provide a basis: seed_appid (games like X), steamid (your "
+                    "taste), or tags.")
+        exclude |= owned_ids
+
+        query = {
+            "json": 1, "infinite": 1, "cc": cc, "l": "english", "category1": 998,
+            "start": 0, "count": 100, "sort_by": "Reviews_DESC",
+            "tags": ",".join(str(t) for t in (filter_ids or seed_ids)),
+        }
+        if params.max_price is not None:
+            query["maxprice"] = str(params.max_price)
+        cand, _ = await _discover_appids(query)
+        cand = [a for a in cand if a not in exclude][:40]
+        if not cand:
+            return "No recommendations found — try fewer/different tags or a higher price."
+
+        cand_tags = await _items_tags(cand)
+        name_map = await _tag_name_map()
+        seed_set = set(seed_ids)
+        scored = []
+        for a in cand:
+            shared = []
+            for t in cand_tags.get(a, []) or []:
+                try:
+                    tid = int(t.get("tagid"))
+                except (TypeError, ValueError):
+                    continue
+                if tid in seed_set and name_map.get(tid):
+                    shared.append(name_map[tid])
+            scored.append((a, shared))
+        scored.sort(key=lambda x: len(x[1]), reverse=True)  # stable: review rank on ties
+        page = scored[: params.limit]
+        infos = await _gather_limited([_app_price(a, cc) for a, _ in page])
+        rows = []
+        for (a, shared), info in zip(page, infos, strict=True):
+            rows.append({
+                "appid": a, "name": info.get("name") or f"app {a}",
+                "price": info.get("price"), "on_sale": info.get("on_sale", False),
+                "discount_pct": info.get("discount_pct", 0),
+                "matching_tags": shared,
+            })
+
+        if params.response_format == ResponseFormat.JSON:
+            return _dump({"basis": basis, "excluded_owned": len(owned_ids),
+                          "count": len(rows), "recommendations": rows})
+
+        owned_note = f", excluding {len(owned_ids)} you own" if owned_ids else ""
+        lines = [f"# Recommendations — {basis}", f"{len(rows)} games{owned_note}:", ""]
+        for r in rows:
+            why = f" — matches: {', '.join(r['matching_tags'])}" if r["matching_tags"] else ""
+            if r["on_sale"]:
+                price = f" [{r['price']} -{r['discount_pct']}%]"
+            elif r["price"]:
+                price = f" [{r['price']}]"
+            else:
+                price = ""
+            lines.append(f"- **{r['name']}** (appid {r['appid']}){price}{why}")
+        return "\n".join(lines)
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
+
+
 def main() -> None:
     """Run the server over stdio (default MCP transport for local clients)."""
     mcp.run()

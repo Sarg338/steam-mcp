@@ -261,6 +261,93 @@ def test_discover_personalized(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# 0.10.0: intelligence tools (should-i-buy, recommend)
+# --------------------------------------------------------------------------- #
+
+def test_should_i_buy(monkeypatch):
+    import time as _t
+    now = int(_t.time())
+
+    async def fake_store(path, params, cache_ttl=0):
+        return {"5": {"success": True, "data": {
+            "name": "Game5", "is_free": False,
+            "price_overview": {"final_formatted": "$20", "initial_formatted": "$40",
+                               "discount_percent": 50},
+            "genres": [{"description": "Action"}],
+            "release_date": {"date": "2022", "coming_soon": False},
+            "metacritic": {"score": 88}}}}
+
+    async def fake_raw(url, params, cache_ttl=0):
+        if params.get("filter") == "recent":
+            return {"success": 1, "cursor": "*", "reviews": [
+                {"voted_up": True, "timestamp_created": now - 10},
+                {"voted_up": True, "timestamp_created": now - 20},
+                {"voted_up": False, "timestamp_created": now - 30},
+                {"voted_up": True, "timestamp_created": now - 99 * 86400}]}  # old -> stop
+        return {"success": 1, "query_summary": {
+            "review_score_desc": "Very Positive", "total_positive": 900,
+            "total_negative": 100, "total_reviews": 1000}}
+
+    async def fake_items(appids):
+        return {5: [{"tagid": 1, "weight": 10}, {"tagid": 2, "weight": 5}]}
+
+    async def fake_map():
+        return {1: "Action", 2: "Indie"}
+
+    monkeypatch.setattr(S, "_store_get", fake_store)
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(S, "_items_tags", fake_items)
+    monkeypatch.setattr(S, "_tag_name_map", fake_map)
+    out = run(S.steam_should_i_buy(S.ShouldIBuyInput(appid=5, response_format="json")))
+    d = json.loads(out)
+    assert d["name"] == "Game5"
+    assert d["discount_pct"] == 50
+    assert d["review_lifetime"]["positive_pct"] == 90.0
+    assert d["review_recent_30d"]["positive_pct"] == 66.7   # 2 of 3 in-window
+    assert d["review_recent_30d"]["reviews_counted"] == 3
+    assert d["review_trend_pts"] == round(66.7 - 90.0, 1)
+    assert d["top_tags"] == ["Action", "Indie"]
+    assert d["personal"] is None                            # no steamid
+
+
+def test_recommend_seed(monkeypatch):
+    async def fake_map():
+        return {1: "Roguelike", 2: "Action", 3: "Co-op"}
+
+    async def fake_items(appids):
+        m = {100: [{"tagid": 1, "weight": 99}, {"tagid": 2, "weight": 50},
+                   {"tagid": 3, "weight": 20}],
+             20: [{"tagid": 1, "weight": 10}, {"tagid": 2, "weight": 5}],   # shares 1,2
+             30: [{"tagid": 1, "weight": 8}],                               # shares 1
+             40: [{"tagid": 1, "weight": 7}, {"tagid": 2, "weight": 3},
+                  {"tagid": 3, "weight": 2}]}                               # shares 1,2,3
+        return {a: m.get(a, []) for a in appids}
+
+    async def fake_discover(query):
+        return [20, 30, 40], 3
+
+    async def fake_app_price(a, cc):
+        return {"name": f"G{a}"}
+
+    monkeypatch.setattr(S, "_tag_name_map", fake_map)
+    monkeypatch.setattr(S, "_items_tags", fake_items)
+    monkeypatch.setattr(S, "_discover_appids", fake_discover)
+    monkeypatch.setattr(S, "_app_price", fake_app_price)
+    out = run(S.steam_recommend(S.RecommendInput(seed_appid=100, response_format="json")))
+    d = json.loads(out)
+    assert d["basis"] == "like G100"
+    ids = [r["appid"] for r in d["recommendations"]]
+    assert 100 not in ids                       # seed excluded
+    assert ids[0] == 40                          # most shared tags (3) ranked first
+    assert d["recommendations"][0]["matching_tags"] == ["Roguelike", "Action", "Co-op"]
+
+
+def test_recommend_requires_basis():
+    out = run(S.steam_recommend(S.RecommendInput()))
+    assert "Provide a basis" in out
+
+
+# --------------------------------------------------------------------------- #
 # Tool logic with mocked HTTP
 # --------------------------------------------------------------------------- #
 
@@ -535,6 +622,8 @@ def test_tools_registered():
     assert "steam_get_rarest_unlocks" in by_name
     assert "steam_find_friends_who_own" in by_name
     assert "steam_discover" in by_name
+    assert "steam_should_i_buy" in by_name
+    assert "steam_recommend" in by_name
     # the reviews tool takes the reviews input (has appid + review_filter),
     # not _fmt_review's raw-dict signature
     schema = json.dumps(by_name["steam_get_app_reviews"].inputSchema)
