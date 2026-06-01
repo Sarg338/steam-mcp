@@ -20,6 +20,7 @@ Account / profile (needs a public profile):
 - "Who's on my Steam friends list, and who's online right now?"
 - "What's my most-played game, and how many hours?"
 - "Which achievements am I still missing in Hollow Knight?"
+- "What are my career stats in *Team Fortress 2*?"
 - "What's my Steam level?" / "Does this account have any VAC bans?"
 - "What's on my wishlist, and is any of it on sale right now?"
 - "Analyze my library — what's my backlog and what have I abandoned?"
@@ -30,6 +31,7 @@ Account-independent (works for any game, no SteamID needed):
 - "How many people are playing *Counter-Strike 2* this minute?"
 - "What was in the latest *Dota 2* update?"
 - "How much does *Hades II* cost and what genres is it?"
+- "What DLC does *Cities: Skylines* have, and is any of it on sale?"
 
 ---
 
@@ -48,8 +50,10 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_get_player_achievements` | Per-game unlocked vs locked achievements | yes |
 | `steam_get_game_schema` | A game's full achievement/stat definitions | yes |
 | `steam_get_global_achievement_percentages` | Achievement rarity (global %) | no |
+| `steam_get_user_game_stats` | **A user's in-game stats** (kills, wins, distance…) for a game | yes |
 | `steam_search_apps` | Game title → appid (+ price) | no |
 | `steam_get_app_details` | **Full store details** — play modes/co-op, controller, DLC, languages, requirements, Metacritic | no |
+| `steam_get_dlc` | **A game's DLC**, with live prices and what's on sale | no |
 | `steam_get_app_reviews` | Lifetime verdict, +/- counts, sample reviews; optional **recent (last-N-days) score** via `review_filter='recent'` | no |
 | `steam_get_featured_specials` | Games currently on sale (regional) | no |
 | `steam_get_store_highlights` | **Top sellers, new releases, or coming soon** | no |
@@ -134,7 +138,10 @@ npx @modelcontextprotocol/inspector python -m steam_mcp.server   # interactive t
 Static storefront/API responses (app & package details, store highlights, game
 schemas, global achievement percentages) are cached in-memory with a short TTL
 to ease the rate limit and speed up tools that fan out many lookups. Live data
-(player status, current players, wishlists, friends) is never cached. See
+(player status, current players, wishlists, friends) is never cached. All
+requests share one pooled HTTP client, and the fan-out tools (wishlist, DLC)
+enrich entries concurrently with bounded parallelism, so they resolve quickly.
+Prices are shown in the requested country's currency. See
 [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## License

@@ -59,7 +59,7 @@ def test_featured_rows():
         [{"id": 1, "name": "G", "original_price": 1999, "final_price": 999,
           "discount_percent": 50}], 5)
     assert rows[0] == {"appid": 1, "name": "G", "original_price": 19.99,
-                       "final_price": 9.99, "discount_pct": 50}
+                       "final_price": 9.99, "discount_pct": 50, "currency": None}
 
 
 def test_cache_key_excludes_api_key():
@@ -121,14 +121,11 @@ def test_store_get_caches(monkeypatch):
         def json(self): return {"ok": calls["n"]}
 
     class FakeClient:
-        def __init__(self, *a, **k): pass
-        async def __aenter__(self): return self
-        async def __aexit__(self, *a): return False
         async def get(self, *a, **k):
             calls["n"] += 1
             return FakeResp()
 
-    monkeypatch.setattr(S.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(S, "_http_client", lambda: FakeClient())
     run(S._store_get("appdetails", {"appids": 1}, cache_ttl=60))
     run(S._store_get("appdetails", {"appids": 1}, cache_ttl=60))
     assert calls["n"] == 1                      # second served from cache
@@ -277,3 +274,137 @@ def test_app_reviews_recent_window(monkeypatch):
     assert d["summary"]["total_reviews"] == 100         # lifetime preserved
     assert d["recent"]["reviews_counted"] == 3          # 4th is outside window
     assert d["recent"]["positive"] == 2
+
+
+# --------------------------------------------------------------------------- #
+# 0.7.0: currency formatting, bounded fan-out, DLC, user stats, registration
+# --------------------------------------------------------------------------- #
+
+def test_fmt_amount():
+    assert S._fmt_amount(9.99, "USD") == "$9.99"
+    assert S._fmt_amount(9.99, "GBP") == "£9.99"
+    assert S._fmt_amount(1234.5, "EUR") == "€1,234.50"
+    assert S._fmt_amount(9.99, "ZZZ") == "9.99 ZZZ"   # unknown -> code suffix
+    assert S._fmt_amount(9.99, None) == "$9.99"        # no code -> $ fallback
+    assert S._fmt_amount(None, "USD") is None
+
+
+def test_gather_limited_preserves_order():
+    async def make(n):
+        return n * 2
+
+    out = run(S._gather_limited([make(1), make(2), make(3)], limit=2))
+    assert out == [2, 4, 6]
+
+
+def test_search_apps_currency(monkeypatch):
+    async def fake_store(path, params, cache_ttl=0):
+        return {"items": [
+            {"id": 7, "name": "Game7", "price": {"currency": "EUR", "final": 1999}}]}
+
+    monkeypatch.setattr(S, "_store_get", fake_store)
+    out = run(S.steam_search_apps(S.AppSearchInput(query="g", country_code="de")))
+    assert "€19.99" in out and "$" not in out
+
+
+def test_featured_specials_currency(monkeypatch):
+    async def fake_fetch(cc):
+        return {"specials": {"items": [
+            {"id": 5, "name": "Deal", "original_price": 1999, "final_price": 999,
+             "discount_percent": 50, "currency": "GBP"}]}}
+
+    monkeypatch.setattr(S, "_fetch_featured", fake_fetch)
+    out = run(S.steam_get_featured_specials(S.FeaturedInput(country_code="gb")))
+    assert "£9.99" in out and "£19.99" in out and "$" not in out
+
+
+def test_package_details_currency(monkeypatch):
+    async def fake_store(path, params, cache_ttl=0):
+        return {"55": {"success": True, "data": {
+            "name": "Bundle",
+            "price": {"currency": "GBP", "initial": 3000, "final": 1500,
+                      "discount_percent": 50},
+            "apps": [{"name": "A"}, {"name": "B"}]}}}
+
+    monkeypatch.setattr(S, "_store_get", fake_store)
+    out = run(S.steam_get_package_details(
+        S.PackageDetailsInput(packageid=55, country_code="gb")))
+    assert "£15.00" in out and "£30.00" in out and "$" not in out
+
+
+def test_get_dlc(monkeypatch):
+    async def fake_store(path, params, cache_ttl=0):
+        return {"100": {"success": True,
+                        "data": {"name": "Base", "dlc": [201, 202]}}}
+
+    prices = {
+        201: {"appid": 201, "name": "DLC One", "price": "$5",
+              "discount_pct": 0, "on_sale": False},
+        202: {"appid": 202, "name": "DLC Two", "price": "$2.50",
+              "discount_pct": 50, "on_sale": True},
+    }
+
+    async def fake_app_price(appid, cc):
+        return prices[appid]
+
+    monkeypatch.setattr(S, "_store_get", fake_store)
+    monkeypatch.setattr(S, "_app_price", fake_app_price)
+
+    out = run(S.steam_get_dlc(S.DlcInput(appid=100, response_format="json")))
+    d = json.loads(out)
+    assert d["base_game"] == "Base"
+    assert d["dlc_total"] == 2 and d["count"] == 2
+    assert d["dlc"][0]["name"] == "DLC One"        # order preserved by gather
+
+    out2 = run(S.steam_get_dlc(
+        S.DlcInput(appid=100, on_sale_only=True, response_format="json")))
+    d2 = json.loads(out2)
+    assert d2["count"] == 1 and d2["dlc"][0]["name"] == "DLC Two"
+
+
+def test_get_dlc_none(monkeypatch):
+    async def fake_store(path, params, cache_ttl=0):
+        return {"100": {"success": True, "data": {"name": "Base", "dlc": []}}}
+
+    monkeypatch.setattr(S, "_store_get", fake_store)
+    out = run(S.steam_get_dlc(S.DlcInput(appid=100)))
+    assert "no listed DLC" in out
+
+
+def test_user_game_stats(monkeypatch):
+    async def fake_steam(path, params, **k):
+        return {"playerstats": {"gameName": "TF2", "stats": [
+            {"name": "kills", "value": 100}, {"name": "deaths", "value": 50}]}}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    out = run(S.steam_get_user_game_stats(
+        S.PlayerGameInput(steamid="76561197960287930", appid=440,
+                          response_format="json")))
+    d = json.loads(out)
+    assert d["game"] == "TF2" and d["stat_count"] == 2
+    assert d["stats"][0] == {"name": "kills", "value": 100}
+
+
+def test_user_game_stats_empty(monkeypatch):
+    async def fake_steam(path, params, **k):
+        return {"playerstats": {"gameName": "X", "stats": []}}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    out = run(S.steam_get_user_game_stats(
+        S.PlayerGameInput(steamid="76561197960287930", appid=1)))
+    assert "No stats available" in out
+
+
+def test_tools_registered():
+    """Reviews tool must be wired to the real function (regression: the
+    @mcp.tool decorator used to sit on the _fmt_review helper), and the new
+    0.7.0 tools must be registered."""
+    tools = run(S.mcp.list_tools())
+    by_name = {t.name: t for t in tools}
+    assert "steam_get_app_reviews" in by_name
+    assert "steam_get_dlc" in by_name
+    assert "steam_get_user_game_stats" in by_name
+    # the reviews tool takes the reviews input (has appid + review_filter),
+    # not _fmt_review's raw-dict signature
+    schema = json.dumps(by_name["steam_get_app_reviews"].inputSchema)
+    assert "appid" in schema and "review_filter" in schema

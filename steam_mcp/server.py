@@ -19,6 +19,7 @@ Get a key (free): https://steamcommunity.com/dev/apikey
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -64,6 +65,22 @@ VISIBILITY_STATES = {
     1: "Private",
     2: "Friends only",
     3: "Public",
+}
+
+# Currency code -> display symbol. Steam's storefront list endpoints (storesearch,
+# featuredcategories, packagedetails) return prices in the requested country's
+# currency as integer minor units plus a currency code, but no preformatted
+# string -- so we format them ourselves. Unknown codes fall back to
+# "<amount> <CODE>", and a missing code falls back to "$".
+CURRENCY_SYMBOLS = {
+    "USD": "$", "GBP": "£", "EUR": "€", "JPY": "¥", "CNY": "¥",
+    "KRW": "₩", "INR": "₹", "RUB": "₽", "BRL": "R$", "CAD": "CA$",
+    "AUD": "A$", "NZD": "NZ$", "MXN": "MX$", "ARS": "ARS$", "CLP": "CLP$",
+    "COP": "COL$", "PEN": "S/.", "ZAR": "R", "TRY": "₺", "UAH": "₴",
+    "PLN": "zł", "CHF": "CHF", "SEK": "kr", "NOK": "kr", "DKK": "kr",
+    "HKD": "HK$", "TWD": "NT$", "SGD": "S$", "THB": "฿", "VND": "₫",
+    "IDR": "Rp", "MYR": "RM", "PHP": "₱", "AED": "AED", "SAR": "SAR",
+    "ILS": "₪", "KZT": "₸", "CRC": "₡",
 }
 
 PROFILE_URL_RE = re.compile(r"steamcommunity\.com/(profiles|id)/([^/?#]+)", re.IGNORECASE)
@@ -169,6 +186,26 @@ def _get_api_key() -> str:
     return key
 
 
+_CLIENT: Optional[httpx.AsyncClient] = None
+
+
+def _http_client() -> httpx.AsyncClient:
+    """Return a lazily-created, shared AsyncClient (keep-alive + pooling).
+
+    Reusing one client avoids a fresh TCP/TLS handshake on every request and lets
+    the fan-out tools (wishlist, DLC, comparisons) run many concurrent lookups
+    over pooled connections. An AsyncClient is safe for concurrent use.
+    """
+    global _CLIENT
+    if _CLIENT is None or _CLIENT.is_closed:
+        _CLIENT = httpx.AsyncClient(
+            timeout=HTTP_TIMEOUT,
+            follow_redirects=True,
+            headers={"Accept": "application/json"},
+        )
+    return _CLIENT
+
+
 async def _steam_get(path: str, params: dict[str, Any], *, with_key: bool = True,
                      cache_ttl: float = 0) -> dict:
     """GET a Steam Web API endpoint and return parsed JSON.
@@ -188,10 +225,10 @@ async def _steam_get(path: str, params: dict[str, Any], *, with_key: bool = True
     query = dict(params)
     if with_key:
         query["key"] = _get_api_key()
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(f"{API_BASE}/{path}", params=query, timeout=HTTP_TIMEOUT)
-        resp.raise_for_status()
-        data = resp.json()
+    client = _http_client()
+    resp = await client.get(f"{API_BASE}/{path}", params=query, timeout=HTTP_TIMEOUT)
+    resp.raise_for_status()
+    data = resp.json()
     if ck is not None:
         _CACHE.set(ck, data, cache_ttl)
     return data
@@ -209,15 +246,10 @@ async def _raw_get(url: str, params: dict[str, Any], cache_ttl: float = 0) -> An
         hit = _CACHE.get(ck)
         if hit is not None:
             return hit
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        resp = await client.get(
-            url,
-            params=params,
-            timeout=HTTP_TIMEOUT,
-            headers={"Accept": "application/json"},
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    client = _http_client()
+    resp = await client.get(url, params=params, timeout=HTTP_TIMEOUT)
+    resp.raise_for_status()
+    data = resp.json()
     if ck is not None:
         _CACHE.set(ck, data, cache_ttl)
     return data
@@ -320,6 +352,41 @@ def _minutes_to_hours(minutes: Optional[int]) -> float:
 
 def _dump(payload: Any) -> str:
     return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
+def _fmt_amount(amount: Optional[float], currency: Optional[str] = None) -> Optional[str]:
+    """Format a price with the right currency symbol.
+
+    `amount` is in major units (e.g. dollars — already divided by 100). Falls back
+    to "<amount> <CODE>" for currencies without a known symbol, and to "$" only
+    when no currency code is available at all.
+    """
+    if amount is None:
+        return None
+    if currency:
+        sym = CURRENCY_SYMBOLS.get(currency.upper())
+        if sym:
+            return f"{sym}{amount:,.2f}"
+        return f"{amount:,.2f} {currency.upper()}"
+    return f"${amount:,.2f}"
+
+
+FANOUT_LIMIT = 8  # max concurrent storefront lookups for fan-out tools
+
+
+async def _gather_limited(coros, limit: int = FANOUT_LIMIT):
+    """Await many coroutines with bounded concurrency, preserving input order.
+
+    Keeps fan-out tools (wishlist / DLC enrichment) fast without hammering the
+    storefront: at most `limit` requests are in flight at once.
+    """
+    sem = asyncio.Semaphore(limit)
+
+    async def _run(coro):
+        async with sem:
+            return await coro
+
+    return await asyncio.gather(*(_run(c) for c in coros))
 
 
 # ---------------------------------------------------------------------------
@@ -1171,6 +1238,73 @@ async def steam_get_global_achievement_percentages(params: AppOnlyInput) -> str:
         return _handle_error(e)
 
 
+@mcp.tool(
+    name="steam_get_user_game_stats",
+    annotations={
+        "title": "Get Steam User Game Stats",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def steam_get_user_game_stats(params: PlayerGameInput) -> str:
+    """Get a user's in-game STATS for a specific game (kills, wins, distance, etc.).
+
+    Complements steam_get_player_achievements: where that lists achievement
+    unlocks, this returns the numeric gameplay stats a game tracks — whatever the
+    developer defined (e.g. total kills, matches won, distance travelled). Use
+    steam_search_apps or steam_get_owned_games first if you only have a game name.
+    Requires the profile's Game Details to be PUBLIC and the game to define stats;
+    many games define none (then this returns an empty result). Needs an API key.
+
+    Args:
+        params (PlayerGameInput): steamid, appid.
+
+    Returns:
+        str: Markdown or JSON. game name plus each tracked stat (name, value).
+    """
+    try:
+        sid = await _resolve_steamid(params.steamid)
+        data = await _steam_get(
+            "ISteamUserStats/GetUserStatsForGame/v2/",
+            {"steamid": sid, "appid": params.appid},
+        )
+        stats_obj = data.get("playerstats", {})
+        stats = stats_obj.get("stats", []) or []
+        game_name = stats_obj.get("gameName") or str(params.appid)
+        if not stats:
+            return (
+                f"No stats available for app {params.appid}. The game may define no "
+                f"stats, or the profile's Game Details are private."
+            )
+        rows = [{"name": s.get("name"), "value": s.get("value")} for s in stats]
+
+        if params.response_format == ResponseFormat.JSON:
+            return _dump(
+                {
+                    "steamid": sid,
+                    "appid": params.appid,
+                    "game": game_name,
+                    "stat_count": len(rows),
+                    "stats": rows,
+                }
+            )
+
+        lines = [
+            f"# Stats: {game_name} (appid {params.appid})",
+            f"{len(rows)} stats tracked for {sid}.",
+            "",
+        ]
+        for r in rows[:100]:
+            lines.append(f"- **{r['name']}**: {r['value']}")
+        if len(rows) > 100:
+            lines.append(f"- …and {len(rows) - 100} more")
+        return "\n".join(lines)
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
+
+
 # ---------------------------------------------------------------------------
 # Tools: store (no API key required)
 # ---------------------------------------------------------------------------
@@ -1208,6 +1342,7 @@ async def steam_search_apps(params: AppSearchInput) -> str:
                 "appid": it.get("id"),
                 "name": it.get("name"),
                 "price": (it.get("price") or {}).get("final"),
+                "currency": (it.get("price") or {}).get("currency"),
             }
             for it in items
         ]
@@ -1220,7 +1355,7 @@ async def steam_search_apps(params: AppSearchInput) -> str:
         for r in rows:
             price = ""
             if r["price"]:
-                price = f" — ${r['price'] / 100:.2f}"
+                price = f" — {_fmt_amount(r['price'] / 100, r['currency'])}"
             lines.append(f"- **{r['name']}** (appid {r['appid']}){price}")
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001
@@ -1407,21 +1542,140 @@ async def steam_get_app_details(params: AppDetailsInput) -> str:
         return _handle_error(e)
 
 
-# ---------------------------------------------------------------------------
-# Tools: market intelligence (sales, reviews, ratings, popularity, news)
-# These are NOT tied to any user account and need no SteamID.
-# ---------------------------------------------------------------------------
+class DlcInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    appid: int = Field(
+        ...,
+        description="Steam application (game) ID of the BASE game whose DLC to list.",
+        ge=1,
+    )
+    limit: int = Field(
+        default=25,
+        description="Max DLC entries to return (1-100). Big franchises list "
+        "hundreds of DLC, so keep this modest when enriching.",
+        ge=1,
+        le=100,
+    )
+    enrich: bool = Field(
+        default=True,
+        description="Fetch each DLC's name + current price/discount (one store "
+        "lookup per DLC, run concurrently). Set false for a fast appid-only list.",
+    )
+    on_sale_only: bool = Field(
+        default=False,
+        description="If true (requires enrich=true), return only DLC currently "
+        "discounted.",
+    )
+    country_code: str = Field(default="us", min_length=2, max_length=2)
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
 
 @mcp.tool(
-    name="steam_get_app_reviews",
+    name="steam_get_dlc",
     annotations={
-        "title": "Get Steam App Reviews & Rating",
+        "title": "Get Steam Game DLC",
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
         "openWorldHint": True,
     },
 )
+async def steam_get_dlc(params: DlcInput) -> str:
+    """List a game's DLC (add-ons), optionally with live prices and sale status.
+
+    Answers "what DLC does X have", "how much is all the X DLC", and "is any X DLC
+    on sale". steam_get_app_details exposes only bare DLC appids; this resolves them
+    to names + current prices (concurrently) and can filter to just the discounts
+    via on_sale_only. Prices are returned in the country_code's local currency. No
+    API key required.
+
+    Args:
+        params (DlcInput): appid (the base game), limit, enrich, on_sale_only,
+            country_code.
+
+    Returns:
+        str: Markdown or JSON. base game name, total DLC count, and per entry:
+        appid and (when enriched) name, price, discount_pct, on_sale.
+    """
+    try:
+        data = await _store_get(
+            "appdetails",
+            {"appids": params.appid, "cc": params.country_code, "l": "english"},
+            cache_ttl=CACHE_TTL_APPDETAILS,
+        )
+        entry = data.get(str(params.appid), {})
+        if not entry.get("success"):
+            return f"No store details found for app {params.appid}."
+        d = entry.get("data", {})
+        base_name = d.get("name") or f"app {params.appid}"
+        dlc_ids = d.get("dlc", []) or []
+        if not dlc_ids:
+            return f"{base_name} (appid {params.appid}) has no listed DLC."
+
+        total = len(dlc_ids)
+        page_ids = dlc_ids[: params.limit]
+        if params.enrich:
+            infos = await _gather_limited(
+                [_app_price(i, params.country_code) for i in page_ids]
+            )
+        else:
+            infos = [None] * len(page_ids)
+
+        rows = []
+        for appid, info in zip(page_ids, infos):
+            row = {"appid": appid}
+            if info is not None:
+                row.update(
+                    {
+                        "name": info.get("name"),
+                        "price": info.get("price"),
+                        "discount_pct": info.get("discount_pct", 0),
+                        "on_sale": info.get("on_sale", False),
+                    }
+                )
+            rows.append(row)
+        if params.enrich and params.on_sale_only:
+            rows = [r for r in rows if r.get("on_sale")]
+
+        if params.response_format == ResponseFormat.JSON:
+            return _dump(
+                {
+                    "appid": params.appid,
+                    "base_game": base_name,
+                    "dlc_total": total,
+                    "count": len(rows),
+                    "enriched": params.enrich,
+                    "dlc": rows,
+                }
+            )
+
+        header = f"{total} DLC total; showing {len(rows)}"
+        if params.on_sale_only:
+            header += " (on sale only)"
+        lines = [f"# DLC for {base_name} (appid {params.appid})", header + ".", ""]
+        for r in rows:
+            if params.enrich:
+                name = r.get("name") or f"appid {r['appid']}"
+                if r.get("on_sale"):
+                    tail = f" — 🔖 {r.get('price')} (-{r.get('discount_pct')}%)"
+                elif r.get("price"):
+                    tail = f" — {r.get('price')}"
+                else:
+                    tail = ""
+                lines.append(f"- **{name}** (appid {r['appid']}){tail}")
+            else:
+                lines.append(f"- appid {r['appid']}")
+        return "\n".join(lines)
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
+
+
+# ---------------------------------------------------------------------------
+# Tools: market intelligence (sales, reviews, ratings, popularity, news)
+# These are NOT tied to any user account and need no SteamID.
+# ---------------------------------------------------------------------------
+
 def _fmt_review(r: dict) -> dict:
     """Normalize one raw Steam review object into a compact dict."""
     text = (r.get("review") or "").strip().replace("\n", " ")
@@ -1484,6 +1738,16 @@ async def _collect_recent_reviews(
     return collected, True  # exhausted page budget without reaching the edge
 
 
+@mcp.tool(
+    name="steam_get_app_reviews",
+    annotations={
+        "title": "Get Steam App Reviews & Rating",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
 async def steam_get_app_reviews(params: AppReviewsInput) -> str:
     """Get the review score and sample reviews for a game (lifetime and/or recent).
 
@@ -1614,6 +1878,7 @@ def _featured_rows(items: list, limit: int) -> list:
                 "original_price": (it.get("original_price") or 0) / 100,
                 "final_price": (it.get("final_price") or 0) / 100,
                 "discount_pct": it.get("discount_percent", 0),
+                "currency": it.get("currency"),
             }
         )
     return rows
@@ -1688,10 +1953,11 @@ async def steam_get_featured_specials(params: FeaturedInput) -> str:
 
         lines = [f"# Steam specials on sale ({params.country_code.upper()})", ""]
         for r in rows:
+            final = _fmt_amount(r["final_price"], r["currency"])
+            orig = _fmt_amount(r["original_price"], r["currency"])
             lines.append(
                 f"- **{r['name']}** (appid {r['appid']}): "
-                f"${r['final_price']:.2f} (was ${r['original_price']:.2f}, "
-                f"-{r['discount_pct']}%)"
+                f"{final} (was {orig}, -{r['discount_pct']}%)"
             )
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001
@@ -1753,11 +2019,12 @@ async def steam_get_store_highlights(params: StoreHighlightsInput) -> str:
         for r in rows:
             if r["discount_pct"]:
                 price = (
-                    f"${r['final_price']:.2f} (was ${r['original_price']:.2f}, "
+                    f"{_fmt_amount(r['final_price'], r['currency'])} (was "
+                    f"{_fmt_amount(r['original_price'], r['currency'])}, "
                     f"-{r['discount_pct']}%)"
                 )
             elif r["final_price"]:
-                price = f"${r['final_price']:.2f}"
+                price = _fmt_amount(r["final_price"], r["currency"])
             else:
                 price = "Free / TBA"
             lines.append(f"- **{r['name']}** (appid {r['appid']}): {price}")
@@ -1807,12 +2074,17 @@ async def steam_get_wishlist(params: WishlistInput) -> str:
         total = len(items)
         page = items[: params.limit]
 
+        if params.enrich:
+            infos = await _gather_limited(
+                [_app_price(it.get("appid"), params.country_code) for it in page]
+            )
+        else:
+            infos = [None] * len(page)
+
         rows = []
-        for it in page:
-            appid = it.get("appid")
-            row = {"appid": appid, "priority": it.get("priority")}
-            if params.enrich:
-                info = await _app_price(appid, params.country_code)
+        for it, info in zip(page, infos):
+            row = {"appid": it.get("appid"), "priority": it.get("priority")}
+            if info is not None:
                 row.update(
                     {
                         "name": info.get("name"),
@@ -2120,12 +2392,14 @@ async def steam_get_package_details(params: PackageDetailsInput) -> str:
         d = entry.get("data", {})
         price = d.get("price") or {}
         apps = [a.get("name") for a in d.get("apps", []) if a.get("name")]
+        currency = price.get("currency") if price else None
         summary = {
             "packageid": params.packageid,
             "name": d.get("name"),
             "final_price": (price.get("final", 0) / 100) if price else None,
             "initial_price": (price.get("initial", 0) / 100) if price else None,
             "discount_pct": price.get("discount_percent", 0) if price else 0,
+            "currency": currency,
             "release_date": (d.get("release_date") or {}).get("date"),
             "apps": apps,
         }
@@ -2136,11 +2410,14 @@ async def steam_get_package_details(params: PackageDetailsInput) -> str:
         if price:
             if summary["discount_pct"]:
                 lines.append(
-                    f"- **Price**: ${summary['final_price']:.2f} "
-                    f"(was ${summary['initial_price']:.2f}, -{summary['discount_pct']}%)"
+                    f"- **Price**: {_fmt_amount(summary['final_price'], currency)} "
+                    f"(was {_fmt_amount(summary['initial_price'], currency)}, "
+                    f"-{summary['discount_pct']}%)"
                 )
             else:
-                lines.append(f"- **Price**: ${summary['final_price']:.2f}")
+                lines.append(
+                    f"- **Price**: {_fmt_amount(summary['final_price'], currency)}"
+                )
         if summary["release_date"]:
             lines.append(f"- **Released**: {summary['release_date']}")
         if apps:
@@ -2185,8 +2462,7 @@ async def steam_compare_players(params: ComparePlayersInput) -> str:
             )
             return {g["appid"]: g for g in d.get("response", {}).get("games", [])}
 
-        games_a = await _owned(sid_a)
-        games_b = await _owned(sid_b)
+        games_a, games_b = await asyncio.gather(_owned(sid_a), _owned(sid_b))
         if not games_a or not games_b:
             return (
                 "Could not compare — one or both profiles have private game details "

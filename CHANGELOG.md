@@ -3,6 +3,31 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.0]
+
+### Added
+- `steam_get_dlc` — list a game's DLC (add-ons) with live prices and an
+  on-sale filter, resolving the bare DLC appids that `steam_get_app_details`
+  exposes into names + prices. Enrichment runs concurrently.
+- `steam_get_user_game_stats` — a user's in-game stats (kills, wins, distance,
+  etc.) for a specific game, via `ISteamUserStats/GetUserStatsForGame`. The
+  numeric counterpart to per-game achievements.
+
+### Changed
+- **Performance:** all HTTP now goes through one shared, pooled `httpx`
+  AsyncClient (keep-alive instead of a new connection per request), and the
+  fan-out tools (wishlist enrichment, DLC, player comparison) issue their
+  lookups concurrently with bounded parallelism instead of serially.
+
+### Fixed
+- **International pricing:** `steam_search_apps`, `steam_get_featured_specials`,
+  `steam_get_store_highlights`, and `steam_get_package_details` now format
+  prices in the requested country's currency (e.g. `£`, `€`) instead of always
+  prefixing `$`.
+- **Reviews tool registration:** the `@mcp.tool` decorator for
+  `steam_get_app_reviews` was attached to an internal helper, so the exposed
+  tool was mis-wired. It is now bound to the correct function.
+
 ## [0.6.0]
 
 ### Added
@@ -55,6 +80,7 @@ All notable changes to this project are documented here. Versions follow
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[0.7.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.7.0
 [0.6.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.6.0
 [0.5.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.5.0
 [0.4.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.4.0
