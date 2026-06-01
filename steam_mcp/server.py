@@ -431,6 +431,12 @@ class PlayerGameInput(PlayerInput):
         description="Steam application (game) ID, e.g. 730 for CS2, 570 for Dota 2.",
         ge=1,
     )
+    language: str = Field(
+        default="english",
+        description="Steam language name for localized text (achievement names, "
+        "etc.), e.g. 'english', 'french', 'german', 'schinese'. Not ISO codes.",
+        min_length=2, max_length=32,
+    )
 
 
 class OwnedGamesInput(PlayerInput):
@@ -506,6 +512,12 @@ class AppDetailsInput(BaseModel):
         description="Include the full 'about the game' text (large). Off by "
         "default; the short description is always included.",
     )
+    language: str = Field(
+        default="english",
+        description="Steam language name for localized text (name, description, "
+        "requirements), e.g. 'english', 'french', 'schinese'. Not ISO codes.",
+        min_length=2, max_length=32,
+    )
     response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
 
 
@@ -518,6 +530,11 @@ class AppSearchInput(BaseModel):
     )
     limit: int = Field(default=10, description="Max results (1-25).", ge=1, le=25)
     country_code: str = Field(default="us", min_length=2, max_length=2)
+    language: str = Field(
+        default="english",
+        description="Steam language name for localized result names. Not ISO codes.",
+        min_length=2, max_length=32,
+    )
     response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
 
 
@@ -558,6 +575,12 @@ class AppReviewsInput(BaseModel):
         le=20,
     )
     country_code: str = Field(default="us", min_length=2, max_length=2)
+    language: str = Field(
+        default="english",
+        description="Review language to include and score: a Steam language name "
+        "(e.g. 'english', 'french') or 'all' for every language. Default 'english'.",
+        min_length=2, max_length=32,
+    )
     response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
 
     @field_validator("review_type")
@@ -1249,7 +1272,7 @@ async def steam_get_player_achievements(params: PlayerGameInput) -> str:
         sid = await _resolve_steamid(params.steamid)
         data = await _steam_get(
             "ISteamUserStats/GetPlayerAchievements/v1/",
-            {"steamid": sid, "appid": params.appid, "l": "english"},
+            {"steamid": sid, "appid": params.appid, "l": params.language},
         )
         stats = data.get("playerstats", {})
         if not stats.get("success", False):
@@ -1442,7 +1465,7 @@ async def steam_get_user_game_stats(params: PlayerGameInput) -> str:
         sid = await _resolve_steamid(params.steamid)
         data = await _steam_get(
             "ISteamUserStats/GetUserStatsForGame/v2/",
-            {"steamid": sid, "appid": params.appid},
+            {"steamid": sid, "appid": params.appid, "l": params.language},
         )
         stats_obj = data.get("playerstats", {})
         stats = stats_obj.get("stats", []) or []
@@ -1518,7 +1541,7 @@ async def steam_get_rarest_unlocks(params: RarestUnlocksInput) -> str:
         ach_data, glob_data = await asyncio.gather(
             _steam_get(
                 "ISteamUserStats/GetPlayerAchievements/v1/",
-                {"steamid": sid, "appid": params.appid, "l": "english"},
+                {"steamid": sid, "appid": params.appid, "l": params.language},
             ),
             _steam_get(
                 "ISteamUserStats/GetGlobalAchievementPercentagesForApp/v2/",
@@ -1610,7 +1633,7 @@ async def steam_search_apps(params: AppSearchInput) -> str:
     try:
         data = await _store_get(
             "storesearch/",
-            {"term": params.query, "l": "english", "cc": params.country_code},
+            {"term": params.query, "l": params.language, "cc": params.country_code},
         )
         items = data.get("items", [])[: params.limit]
         rows = [
@@ -1671,7 +1694,7 @@ async def steam_get_app_details(params: AppDetailsInput) -> str:
     try:
         data = await _store_get(
             "appdetails",
-            {"appids": params.appid, "cc": params.country_code, "l": "english"},
+            {"appids": params.appid, "cc": params.country_code, "l": params.language},
             cache_ttl=CACHE_TTL_APPDETAILS,
         )
         entry = data.get(str(params.appid), {})
@@ -2421,7 +2444,7 @@ def _fmt_review(r: dict) -> dict:
 
 
 async def _collect_recent_reviews(
-    appid: int, day_range: int, cc: str
+    appid: int, day_range: int, cc: str, language: str = "english"
 ) -> tuple[list[dict], bool]:
     """Paginate the newest reviews (filter=recent) within the last `day_range` days.
 
@@ -2442,7 +2465,7 @@ async def _collect_recent_reviews(
             {
                 "json": 1,
                 "filter": "recent",
-                "language": "english",
+                "language": language,
                 "review_type": "all",
                 "purchase_type": "all",
                 "num_per_page": RECENT_PAGE_SIZE,
@@ -2507,7 +2530,7 @@ async def steam_get_app_reviews(params: AppReviewsInput) -> str:
             {
                 "json": 1,
                 "filter": "all",
-                "language": "english",
+                "language": params.language,
                 "review_type": params.review_type,
                 "purchase_type": "all",
                 "num_per_page": params.limit if params.review_filter == "all" else 0,
@@ -2525,7 +2548,7 @@ async def steam_get_app_reviews(params: AppReviewsInput) -> str:
         recent = None
         if params.review_filter == "recent":
             window, capped = await _collect_recent_reviews(
-                params.appid, params.day_range, params.country_code
+                params.appid, params.day_range, params.country_code, params.language
             )
             rpos = sum(1 for r in window if r.get("voted_up"))
             rneg = len(window) - rpos
@@ -4026,6 +4049,118 @@ async def steam_plan_coop_night(params: PlanCoopNightInput) -> str:
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001
         return _handle_error(e)
+
+
+# ---------------------------------------------------------------------------
+# Prompts — guided, one-shot flows that orchestrate the tools
+# ---------------------------------------------------------------------------
+
+@mcp.prompt(
+    name="what_should_i_play",
+    description="Recommend what to play next from a user's library and taste.",
+)
+def prompt_what_should_i_play(steamid: str) -> str:
+    return (
+        f"Recommend what the Steam user '{steamid}' should play next. "
+        f"(1) Call steam_analyze_library(steamid='{steamid}') to surface their "
+        f"backlog and abandoned games they already own. (2) Call "
+        f"steam_recommend(steamid='{steamid}') for NEW games matching their taste. "
+        f"Then give a short, friendly shortlist: a couple of owned-but-unplayed "
+        f"games worth finishing AND a couple of new games to consider — one line on "
+        f"why each fits their taste."
+    )
+
+
+@mcp.prompt(
+    name="is_it_worth_buying",
+    description="Decide whether a game is worth buying right now.",
+)
+def prompt_is_it_worth_buying(game: str, steamid: str = "") -> str:
+    base = (
+        f"Help decide whether to buy '{game}' on Steam right now. If '{game}' is a "
+        f"title rather than an appid, resolve it with steam_search_apps first, then "
+        f"call steam_should_i_buy with that appid. Weigh the price/discount, the "
+        f"LIFETIME vs RECENT review trend, the tags, and Metacritic, then give a "
+        f"clear recommendation with the reasoning."
+    )
+    if steamid:
+        base += (
+            f" Personalize it: pass steamid='{steamid}' to steam_should_i_buy to "
+            f"check whether they already own it and how its tags match their "
+            f"most-played games."
+        )
+    return base
+
+
+@mcp.prompt(
+    name="plan_game_night",
+    description="Plan a co-op game night with a user's online friends.",
+)
+def prompt_plan_game_night(steamid: str) -> str:
+    return (
+        f"Plan a co-op game night for Steam user '{steamid}'. Call "
+        f"steam_plan_coop_night(steamid='{steamid}') to find co-op games the user "
+        f"and their online friends all own. Present the top options — noting who's "
+        f"online now and how many of the group own each — and suggest one to start."
+    )
+
+
+@mcp.prompt(
+    name="steam_deals",
+    description="Find Steam deals worth buying right now.",
+)
+def prompt_steam_deals(max_price: str = "") -> str:
+    extra = f" Focus on games at or under {max_price} (pass max_price)." if max_price else ""
+    return (
+        "Find good Steam deals right now. Use steam_get_featured_specials and/or "
+        "steam_discover(on_sale=true, sort='reviews') to get discounted games, prefer "
+        "well-reviewed ones (check steam_get_app_reviews for anything promising), and "
+        f"summarize the best 5-10 with price, discount, and review score.{extra}"
+    )
+
+
+@mcp.prompt(
+    name="game_overview",
+    description="Give a comprehensive overview of a game.",
+)
+def prompt_game_overview(game: str) -> str:
+    return (
+        f"Give a comprehensive overview of '{game}' on Steam. Resolve the appid with "
+        f"steam_search_apps if needed, then combine steam_get_app_details, "
+        f"steam_get_app_tags, steam_get_app_reviews (lifetime + recent), and "
+        f"steam_get_current_players into a tight summary: what it is, price, how it "
+        f"reviews, its vibe (tags), and how alive it is right now."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Resources — reference Steam entities by URI (steam://app/{id}, steam://user/{id})
+# ---------------------------------------------------------------------------
+
+@mcp.resource(
+    "steam://app/{appid}",
+    name="Steam app details",
+    description="Store details for a Steam app by appid.",
+    mime_type="text/markdown",
+)
+async def resource_app(appid: str) -> str:
+    """Resolve steam://app/<appid> to the app's store details (markdown)."""
+    try:
+        aid = int(appid)
+    except (TypeError, ValueError):
+        return f"Invalid appid: {appid!r}"
+    return await steam_get_app_details(AppDetailsInput(appid=aid))
+
+
+@mcp.resource(
+    "steam://user/{steamid}",
+    name="Steam player summary",
+    description="Profile + live status for a Steam user (SteamID64, vanity, or URL).",
+    mime_type="text/markdown",
+)
+async def resource_user(steamid: str) -> str:
+    """Resolve steam://user/<steamid> to the player's summary (markdown)."""
+    return await steam_get_player_summary(PlayersInput(steamids=[steamid]))
 
 
 def main() -> None:

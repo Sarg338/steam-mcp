@@ -3,6 +3,21 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.12.0]
+
+### Added
+- **MCP prompts** — guided one-shot flows that orchestrate the tools:
+  `what_should_i_play`, `is_it_worth_buying`, `plan_game_night`, `steam_deals`,
+  and `game_overview`.
+- **MCP resources** — reference Steam entities by URI: `steam://app/{appid}`
+  (store details) and `steam://user/{steamid}` (profile + live status).
+- **Localization** — `steam_get_app_details`, `steam_search_apps`,
+  `steam_get_app_reviews`, `steam_get_player_achievements`,
+  `steam_get_user_game_stats`, and `steam_get_rarest_unlocks` now accept a
+  `language` parameter (a Steam language name, e.g. `french`, `schinese`; default
+  `english`). For reviews it also selects which language's reviews to score (or
+  `all`).
+
 ## [0.11.0]
 
 ### Added
@@ -142,6 +157,7 @@ All notable changes to this project are documented here. Versions follow
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[0.12.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.12.0
 [0.11.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.11.0
 [0.10.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.10.0
 [0.9.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.9.0

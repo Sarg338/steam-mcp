@@ -401,6 +401,65 @@ def test_plan_coop_night(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# 0.12.0: prompts, resources, localization
+# --------------------------------------------------------------------------- #
+
+def test_prompts_registered():
+    names = {p.name for p in run(S.mcp.list_prompts())}
+    assert {"what_should_i_play", "is_it_worth_buying", "plan_game_night",
+            "steam_deals", "game_overview"} <= names
+
+
+def test_prompt_renders():
+    res = run(S.mcp.get_prompt("plan_game_night", {"steamid": "123"}))
+    text = " ".join(getattr(m.content, "text", str(m.content)) for m in res.messages)
+    assert "steam_plan_coop_night" in text and "123" in text
+
+
+def test_resources_registered():
+    uris = {t.uriTemplate for t in run(S.mcp.list_resource_templates())}
+    assert "steam://app/{appid}" in uris
+    assert "steam://user/{steamid}" in uris
+
+
+def test_resource_app_reads(monkeypatch):
+    async def fake_store(path, params, cache_ttl=0):
+        return {"570": {"success": True,
+                        "data": {"name": "Dota 2", "type": "game", "is_free": True}}}
+
+    monkeypatch.setattr(S, "_store_get", fake_store)
+    parts = list(run(S.mcp.read_resource("steam://app/570")))
+    text = " ".join(str(getattr(p, "content", p)) for p in parts)
+    assert "Dota 2" in text
+
+
+def test_app_details_language(monkeypatch):
+    captured = {}
+
+    async def fake_store(path, params, cache_ttl=0):
+        captured.update(params)
+        return {"5": {"success": True, "data": {"name": "G", "type": "game"}}}
+
+    monkeypatch.setattr(S, "_store_get", fake_store)
+    run(S.steam_get_app_details(S.AppDetailsInput(appid=5, language="french")))
+    assert captured.get("l") == "french"
+
+
+def test_app_reviews_language(monkeypatch):
+    captured = {}
+
+    async def fake_raw(url, params, cache_ttl=0):
+        captured.update(params)
+        return {"success": 1, "reviews": [], "query_summary": {
+            "review_score_desc": "x", "total_positive": 1,
+            "total_negative": 0, "total_reviews": 1}}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    run(S.steam_get_app_reviews(S.AppReviewsInput(appid=1, language="german")))
+    assert captured.get("language") == "german"
+
+
+# --------------------------------------------------------------------------- #
 # Tool logic with mocked HTTP
 # --------------------------------------------------------------------------- #
 

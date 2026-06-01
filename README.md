@@ -80,11 +80,24 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_get_app_news` | Recent news / patch notes | no |
 
 Every tool supports `response_format: "markdown"` (default, human-readable) or
-`"json"` (structured), and all are annotated `readOnlyHint: true`.
+`"json"` (structured), and all are annotated `readOnlyHint: true`. Tools that read
+localized text (`steam_get_app_details`, `steam_search_apps`, `steam_get_app_reviews`,
+`steam_get_player_achievements`, …) accept a `language` parameter — a Steam language
+name like `english`, `french`, `german`, or `schinese` (default `english`).
 
 > \* `steam_discover`, `steam_should_i_buy`, and `steam_recommend` need no key for
 > the store data; their **personalization** (passing a `steamid` to use a user's
 > library/taste) requires a key and a public profile.
+
+### Prompts & resources
+
+Beyond tools, the server ships **prompts** (guided one-click flows that orchestrate
+the tools) and **resources** (reference Steam entities by URI):
+
+- Prompts: `what_should_i_play`, `is_it_worth_buying`, `plan_game_night`,
+  `steam_deals`, `game_overview`.
+- Resources: `steam://app/{appid}` (store details) and `steam://user/{steamid}`
+  (profile + live status).
 
 > **Recent reviews:** Steam's API only exposes a *lifetime* review summary — there
 > is no "last 30 days" field. So `steam_get_app_reviews` with
