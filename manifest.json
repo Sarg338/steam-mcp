@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "steam-mcp",
   "display_name": "Steam (read-only)",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Read-only Steam: friends, games, playtime, achievements, sales, reviews, live player counts.",
   "long_description": "A read-only Model Context Protocol server for the public Steam Web API and storefront. Ask about your friends and their live status, your owned games and playtime, achievement progress and rarity, plus account-independent things like what's on sale, review scores (lifetime and last-30-days), live concurrent player counts, and patch notes.\n\nBring your own key: each user supplies their own free Steam Web API key, requested securely on install. The server is strictly read-only — it never sends messages, changes status, launches games, or makes purchases. Note that friends lists, owned games, and achievements are only visible when the target Steam profile's privacy is set to Public.",
   "author": {
@@ -49,6 +49,9 @@
     { "name": "steam_get_featured_specials", "description": "Games currently on sale (regional)" },
     { "name": "steam_get_store_highlights", "description": "Top sellers, new releases, or coming soon" },
     { "name": "steam_get_wishlist", "description": "A user's wishlist, with live prices and what's on sale" },
+    { "name": "steam_get_player_badges", "description": "Badges + the XP breakdown behind a user's Steam level" },
+    { "name": "steam_get_package_details", "description": "Details for a package/bundle (price, included games)" },
+    { "name": "steam_compare_players", "description": "Shared games between two users, with playtime" },
     { "name": "steam_get_current_players", "description": "Live concurrent player count for a game" },
     { "name": "steam_get_app_news", "description": "Recent news and patch notes for a game" }
   ],

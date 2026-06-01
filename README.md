@@ -52,6 +52,9 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_get_featured_specials` | Games currently on sale (regional) | no |
 | `steam_get_store_highlights` | **Top sellers, new releases, or coming soon** | no |
 | `steam_get_wishlist` | **A user's wishlist, with live prices + what's on sale** | yes |
+| `steam_get_player_badges` | Badges + the XP breakdown behind a Steam level | yes |
+| `steam_get_package_details` | Package/bundle price + included games | no |
+| `steam_compare_players` | Shared games between two users, with playtime | yes |
 | `steam_get_current_players` | Live concurrent player count | no |
 | `steam_get_app_news` | Recent news / patch notes | no |
 

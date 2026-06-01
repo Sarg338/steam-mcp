@@ -14,3 +14,5 @@ venv/
 _build_out.txt
 PUBLISHING.md
 _*.bat
+/_*.py
+/_*.txt

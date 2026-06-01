@@ -1762,6 +1762,286 @@ async def steam_get_app_news(params: AppNewsInput) -> str:
         return _handle_error(e)
 
 
+# ---------------------------------------------------------------------------
+# Tools: badges, package details, and player comparison
+# ---------------------------------------------------------------------------
+
+class PackageDetailsInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    packageid: int = Field(
+        ...,
+        description="Steam package (sub) ID. Package IDs appear in a game's "
+        "store details under 'packages' (distinct from app IDs).",
+        ge=1,
+    )
+    country_code: str = Field(
+        default="us",
+        description="ISO country code for regional pricing (e.g. 'us', 'gb').",
+        min_length=2,
+        max_length=2,
+    )
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+class ComparePlayersInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    steamid_a: str = Field(
+        ...,
+        description="First user: SteamID64, vanity name, or profile URL.",
+        min_length=1,
+        max_length=200,
+    )
+    steamid_b: str = Field(
+        ...,
+        description="Second user: SteamID64, vanity name, or profile URL.",
+        min_length=1,
+        max_length=200,
+    )
+    limit: int = Field(
+        default=20,
+        description="Max shared games to list, ordered by combined playtime (1-100).",
+        ge=1,
+        le=100,
+    )
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+@mcp.tool(
+    name="steam_get_player_badges",
+    annotations={
+        "title": "Get Steam Player Badges",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def steam_get_player_badges(params: PlayerInput) -> str:
+    """Get a user's badges and the XP breakdown behind their Steam level.
+
+    Answers "what badges do I have" and "how is my Steam level made up". Reports
+    the level, total XP, XP needed to reach the next level, badge count, and the
+    highest-XP badges. Requires the profile to be Public. Needs an API key.
+
+    Args:
+        params (PlayerInput): steamid.
+
+    Returns:
+        str: Markdown or JSON. player_level, player_xp, xp_needed_to_level_up,
+        badge_count, and top badges (badgeid, appid, level, xp, scarcity).
+    """
+    try:
+        sid = await _resolve_steamid(params.steamid)
+        data = await _steam_get("IPlayerService/GetBadges/v1/", {"steamid": sid})
+        resp = data.get("response", {})
+        badges = resp.get("badges", [])
+        if not resp or resp.get("player_level") is None:
+            return "No badge data returned (the profile is likely private)."
+        level = resp.get("player_level")
+        xp = resp.get("player_xp") or 0
+        to_next = resp.get("player_xp_needed_to_level_up") or 0
+        top = sorted(badges, key=lambda b: b.get("xp", 0), reverse=True)[:15]
+
+        if params.response_format == ResponseFormat.JSON:
+            return _dump(
+                {
+                    "steamid": sid,
+                    "player_level": level,
+                    "player_xp": xp,
+                    "xp_needed_to_level_up": to_next,
+                    "badge_count": len(badges),
+                    "badges": [
+                        {
+                            "badgeid": b.get("badgeid"),
+                            "appid": b.get("appid"),
+                            "level": b.get("level"),
+                            "xp": b.get("xp"),
+                            "scarcity": b.get("scarcity"),
+                        }
+                        for b in top
+                    ],
+                }
+            )
+
+        lines = [
+            f"# Badges for {sid}",
+            f"- **Steam level**: {level} (XP {xp:,}; {to_next:,} to next level)",
+            f"- **Badges earned**: {len(badges)}",
+        ]
+        if top:
+            lines += ["", "## Top badges by XP"]
+            for b in top:
+                what = f"game {b['appid']}" if b.get("appid") else f"badge {b.get('badgeid')}"
+                lines.append(
+                    f"- {what}: level {b.get('level')}, {b.get('xp')} XP "
+                    f"(owned by {b.get('scarcity')} users)"
+                )
+        return "\n".join(lines)
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="steam_get_package_details",
+    annotations={
+        "title": "Get Steam Package/Bundle Details",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def steam_get_package_details(params: PackageDetailsInput) -> str:
+    """Get store details for a Steam package (a sub/bundle of one or more games).
+
+    Answers "how much is the X package" and "what games are in this bundle".
+    appdetails covers single games; this covers multi-game packages. No API key
+    required.
+
+    Args:
+        params (PackageDetailsInput): packageid, country_code.
+
+    Returns:
+        str: Markdown or JSON. name, price, discount, release date, and the list
+        of apps the package includes.
+    """
+    try:
+        data = await _store_get(
+            "packagedetails",
+            {"packageids": params.packageid, "cc": params.country_code, "l": "english"},
+        )
+        entry = data.get(str(params.packageid), {})
+        if not entry.get("success"):
+            return f"No package details found for package {params.packageid}."
+        d = entry.get("data", {})
+        price = d.get("price") or {}
+        apps = [a.get("name") for a in d.get("apps", []) if a.get("name")]
+        summary = {
+            "packageid": params.packageid,
+            "name": d.get("name"),
+            "final_price": (price.get("final", 0) / 100) if price else None,
+            "initial_price": (price.get("initial", 0) / 100) if price else None,
+            "discount_pct": price.get("discount_percent", 0) if price else 0,
+            "release_date": (d.get("release_date") or {}).get("date"),
+            "apps": apps,
+        }
+        if params.response_format == ResponseFormat.JSON:
+            return _dump(summary)
+
+        lines = [f"# {summary['name']} (package {params.packageid})"]
+        if price:
+            if summary["discount_pct"]:
+                lines.append(
+                    f"- **Price**: ${summary['final_price']:.2f} "
+                    f"(was ${summary['initial_price']:.2f}, -{summary['discount_pct']}%)"
+                )
+            else:
+                lines.append(f"- **Price**: ${summary['final_price']:.2f}")
+        if summary["release_date"]:
+            lines.append(f"- **Released**: {summary['release_date']}")
+        if apps:
+            lines.append(f"- **Includes {len(apps)} app(s)**: " + ", ".join(apps[:20]))
+        return "\n".join(lines)
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="steam_compare_players",
+    annotations={
+        "title": "Compare Two Steam Players",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def steam_compare_players(params: ComparePlayersInput) -> str:
+    """Compare two users' libraries: shared games and who has played each more.
+
+    Answers "what games do we both own" and "who has more hours in the games we
+    share". Built on each user's owned-games list. Requires BOTH profiles' game
+    details to be Public. Needs an API key.
+
+    Args:
+        params (ComparePlayersInput): steamid_a, steamid_b, limit.
+
+    Returns:
+        str: Markdown or JSON. each user's game count, the shared-game count, and
+        the top shared games with each player's hours.
+    """
+    try:
+        sid_a = await _resolve_steamid(params.steamid_a)
+        sid_b = await _resolve_steamid(params.steamid_b)
+
+        async def _owned(sid: str) -> dict:
+            d = await _steam_get(
+                "IPlayerService/GetOwnedGames/v1/",
+                {"steamid": sid, "include_appinfo": 1, "include_played_free_games": 1},
+            )
+            return {g["appid"]: g for g in d.get("response", {}).get("games", [])}
+
+        games_a = await _owned(sid_a)
+        games_b = await _owned(sid_b)
+        if not games_a or not games_b:
+            return (
+                "Could not compare — one or both profiles have private game details "
+                "(or own no games)."
+            )
+
+        shared_ids = set(games_a) & set(games_b)
+        shared = []
+        for aid in shared_ids:
+            ga, gb = games_a[aid], games_b[aid]
+            ha = _minutes_to_hours(ga.get("playtime_forever"))
+            hb = _minutes_to_hours(gb.get("playtime_forever"))
+            shared.append(
+                {
+                    "appid": aid,
+                    "name": ga.get("name") or gb.get("name"),
+                    "hours_a": ha,
+                    "hours_b": hb,
+                    "combined": round(ha + hb, 1),
+                }
+            )
+        shared.sort(key=lambda s: s["combined"], reverse=True)
+        page = shared[: params.limit]
+
+        if params.response_format == ResponseFormat.JSON:
+            return _dump(
+                {
+                    "a": {"steamid": sid_a, "game_count": len(games_a)},
+                    "b": {"steamid": sid_b, "game_count": len(games_b)},
+                    "shared_count": len(shared_ids),
+                    "shared": page,
+                }
+            )
+
+        lines = [
+            f"# Comparing {sid_a} (A) vs {sid_b} (B)",
+            f"- A owns {len(games_a)} games; B owns {len(games_b)}.",
+            f"- **Shared games**: {len(shared_ids)}",
+            "",
+            "## Top shared games by combined playtime",
+        ]
+        for s in page:
+            if s["hours_a"] > s["hours_b"]:
+                who = "A ahead"
+            elif s["hours_b"] > s["hours_a"]:
+                who = "B ahead"
+            else:
+                who = "tied"
+            lines.append(
+                f"- **{s['name']}** (appid {s['appid']}): "
+                f"A {s['hours_a']}h / B {s['hours_b']}h → {who}"
+            )
+        return "\n".join(lines)
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
+
+
 def main() -> None:
     """Run the server over stdio (default MCP transport for local clients)."""
     mcp.run()
