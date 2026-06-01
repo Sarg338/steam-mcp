@@ -120,24 +120,6 @@ Restart your client and the Steam tools appear.
 
 ---
 
-## Important limits (read before publishing)
-
-- **Privacy gates everything.** Friends, owned games, and achievements are only
-  visible if the target user's profile (and the relevant sub-setting, e.g. *Game
-  Details* / *Friends List*) is set to **Public**. Private profiles return empty —
-  this is a Steam setting, not a bug in this server.
-- **No private-data access.** Steam has no OAuth flow that lets a third party read
-  another user's *private* data. "Sign in through Steam" only proves identity; it
-  unlocks nothing extra. This server is therefore public-data only, by design.
-- **One key per user.** Because it's BYOK, each user's traffic counts against
-  *their own* key's rate limit (~100,000 calls/day). Do not ship a shared key in
-  a public deployment — it will get throttled or banned.
-- **Read-only.** There are deliberately no tools that send messages, change
-  status, launch games, or make purchases. The Steam Web API does not expose those
-  anyway, and they're out of scope here.
-
----
-
 ## Development
 
 ```bash
