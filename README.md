@@ -158,6 +158,28 @@ Restart your client and the Steam tools appear.
 
 ---
 
+## Versioning & stability
+
+`steam-mcp` follows [Semantic Versioning](https://semver.org). As of **1.0**, the
+following are the **stable public surface** — they won't change without a major
+(2.0) release:
+
+- **Tool names** and their **input parameters** (names, types, whether required,
+  defaults)
+- **JSON output fields** (`response_format: "json"`) — names, types, and structure
+- **Prompt** names/arguments and **resource** URI templates
+  (`steam://app/{appid}`, `steam://user/{steamid}`)
+- Core semantics: read-only, bring-your-own-key, prices in cents / playtime in
+  minutes, and errors returned as strings
+
+Within a major version, **minor** releases may *add* tools, prompts, resources,
+optional parameters, and JSON fields; **patch** releases are bug fixes only. The
+**Markdown** output wording, internal implementation, caching behavior, and which
+Steam endpoints back a given tool may change at any time and are **not** part of
+the contract.
+
+---
+
 ## License
 
 MIT. Not affiliated with Valve. "Steam" is a trademark of Valve Corporation.

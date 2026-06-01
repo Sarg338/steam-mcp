@@ -1,6 +1,6 @@
 [project]
 name = "steam-mcp"
-version = "0.12.0"
+version = "1.0.0"
 description = "Read-only Steam MCP server (bring-your-own-key) for friends, games, playtime, achievements, sales, reviews, and live player counts."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -8,7 +8,7 @@ license = { text = "MIT" }
 authors = [{ name = "Sarg" }]
 keywords = ["mcp", "steam", "model-context-protocol", "llm", "valve", "gaming"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Intended Audience :: End Users/Desktop",
     "License :: OSI Approved :: MIT License",

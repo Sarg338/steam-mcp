@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import re
 import time
 from enum import Enum
@@ -42,6 +43,14 @@ API_BASE = "https://api.steampowered.com"
 STORE_BASE = "https://store.steampowered.com/api"
 HTTP_TIMEOUT = 30.0
 ENV_KEY = "STEAM_API_KEY"
+
+# Bounded retry for transient failures. 429 (rate limit) and 502/503/504 are
+# retried with exponential backoff + jitter, honoring a Retry-After header; other
+# statuses (401/403/404/500) fail fast since retrying won't help.
+MAX_RETRIES = 3
+RETRY_BASE_DELAY = 0.5
+RETRY_MAX_DELAY = 10.0
+RETRYABLE_STATUS = {429, 502, 503, 504}
 
 # Recent-reviews computation: Steam's query_summary is always lifetime, so the
 # recent (last-N-days) score is computed by paginating the newest reviews. These
@@ -101,6 +110,8 @@ CACHE_TTL_GLOBAL_ACH = 3600
 CACHE_TTL_TAGS = 3600           # community tag weights (slow-changing)
 CACHE_TTL_TAGMAP = 86400        # tagid -> name dictionary is effectively static
 CACHE_TTL_DISCOVER = 300        # storefront search results (5 min)
+CACHE_TTL_NEWS = 900            # news / patch notes change slowly (15 min)
+CACHE_TTL_REVIEWS = 300         # lifetime review summary (5 min)
 
 
 class _TTLCache:
@@ -221,6 +232,41 @@ def _http_client() -> httpx.AsyncClient:
     return _CLIENT
 
 
+def _retry_delay(resp, attempt: int) -> float:
+    """Seconds to wait before a retry: honor Retry-After (seconds), else backoff."""
+    ra = resp.headers.get("Retry-After") if resp is not None else None
+    if ra:
+        try:
+            return min(float(ra), RETRY_MAX_DELAY)
+        except (TypeError, ValueError):
+            pass
+    return min(RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.3),
+               RETRY_MAX_DELAY)
+
+
+async def _get_with_retry(client, url: str, params: dict, timeout: float):
+    """GET with bounded retry on 429/502/503/504 and timeouts (honors Retry-After).
+
+    Returns a status-checked response. On the final attempt a retryable status is
+    raised like any other HTTP error, so _handle_error can format it.
+    """
+    for attempt in range(MAX_RETRIES + 1):
+        final = attempt == MAX_RETRIES
+        try:
+            resp = await client.get(url, params=params, timeout=timeout)
+        except httpx.TimeoutException:
+            if final:
+                raise
+            await asyncio.sleep(_retry_delay(None, attempt))
+            continue
+        if resp.status_code in RETRYABLE_STATUS and not final:
+            await asyncio.sleep(_retry_delay(resp, attempt))
+            continue
+        resp.raise_for_status()
+        return resp
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
 async def _steam_get(path: str, params: dict[str, Any], *, with_key: bool = True,
                      cache_ttl: float = 0) -> dict:
     """GET a Steam Web API endpoint and return parsed JSON.
@@ -241,8 +287,7 @@ async def _steam_get(path: str, params: dict[str, Any], *, with_key: bool = True
     if with_key:
         query["key"] = _get_api_key()
     client = _http_client()
-    resp = await client.get(f"{API_BASE}/{path}", params=query, timeout=HTTP_TIMEOUT)
-    resp.raise_for_status()
+    resp = await _get_with_retry(client, f"{API_BASE}/{path}", query, HTTP_TIMEOUT)
     data = resp.json()
     if ck is not None:
         _CACHE.set(ck, data, cache_ttl)
@@ -262,8 +307,7 @@ async def _raw_get(url: str, params: dict[str, Any], cache_ttl: float = 0) -> An
         if hit is not None:
             return hit
     client = _http_client()
-    resp = await client.get(url, params=params, timeout=HTTP_TIMEOUT)
-    resp.raise_for_status()
+    resp = await _get_with_retry(client, url, params, HTTP_TIMEOUT)
     data = resp.json()
     if ck is not None:
         _CACHE.set(ck, data, cache_ttl)
@@ -2536,6 +2580,7 @@ async def steam_get_app_reviews(params: AppReviewsInput) -> str:
                 "num_per_page": params.limit if params.review_filter == "all" else 0,
                 "cc": params.country_code,
             },
+            cache_ttl=CACHE_TTL_REVIEWS,
         )
         if base.get("success") != 1:
             return f"No review data available for app {params.appid}."
@@ -2951,6 +2996,7 @@ async def steam_get_app_news(params: AppNewsInput) -> str:
             "ISteamNews/GetNewsForApp/v2/",
             {"appid": params.appid, "count": params.count, "maxlength": 300},
             with_key=False,
+            cache_ttl=CACHE_TTL_NEWS,
         )
         items = data.get("appnews", {}).get("newsitems", [])
         rows = []
@@ -3566,7 +3612,8 @@ async def steam_should_i_buy(params: ShouldIBuyInput) -> str:
             _raw_get(f"https://store.steampowered.com/appreviews/{params.appid}",
                      {"json": 1, "filter": "all", "language": "english",
                       "review_type": "all", "purchase_type": "all",
-                      "num_per_page": 0, "cc": cc}),
+                      "num_per_page": 0, "cc": cc},
+                     cache_ttl=CACHE_TTL_REVIEWS),
             _items_tags([params.appid]),
         )
         entry = details.get(str(params.appid), {}) if isinstance(details, dict) else {}

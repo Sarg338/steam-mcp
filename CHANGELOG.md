@@ -3,6 +3,25 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.0]
+
+First stable release. The public surface — tool names + input parameters, JSON
+output fields, prompt names/arguments, and resource URIs — is now covered by a
+**stability contract** (see "Versioning & stability" in the README); breaking
+changes will require a 2.0.
+
+### Added
+- **Stability contract** documented in the README (SemVer policy + what's covered).
+- **Retry with backoff** for transient failures: 429 and 502/503/504 are retried
+  with exponential backoff + jitter, honoring a `Retry-After` header; other
+  statuses still fail fast.
+
+### Changed
+- **Broader caching**: news (`steam_get_app_news`, 15 min) and the lifetime review
+  summary (5 min) now use the in-memory TTL cache. Live data (player status,
+  current players, wishlists, friends, recent-review pagination) is still uncached.
+- Package classifier moved to "Production/Stable".
+
 ## [0.12.0]
 
 ### Added
@@ -157,6 +176,7 @@ All notable changes to this project are documented here. Versions follow
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[1.0.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.0.0
 [0.12.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.12.0
 [0.11.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.11.0
 [0.10.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.10.0

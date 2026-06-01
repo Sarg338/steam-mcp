@@ -117,6 +117,7 @@ def test_store_get_caches(monkeypatch):
     calls = {"n": 0}
 
     class FakeResp:
+        status_code = 200
         def raise_for_status(self): pass
         def json(self): return {"ok": calls["n"]}
 
@@ -457,6 +458,60 @@ def test_app_reviews_language(monkeypatch):
     monkeypatch.setattr(S, "_raw_get", fake_raw)
     run(S.steam_get_app_reviews(S.AppReviewsInput(appid=1, language="german")))
     assert captured.get("language") == "german"
+
+
+# --------------------------------------------------------------------------- #
+# 1.0.0: retry / backoff on transient failures
+# --------------------------------------------------------------------------- #
+
+class _RetryResp:
+    def __init__(self, code):
+        self.status_code = code
+        self.headers = {}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self):
+        return {"ok": True}
+
+
+def test_get_with_retry_succeeds_after_429(monkeypatch):
+    S._CACHE.clear()
+    calls = {"n": 0}
+
+    class FakeClient:
+        async def get(self, *a, **k):
+            calls["n"] += 1
+            return _RetryResp(429 if calls["n"] == 1 else 200)
+
+    async def no_sleep(*a, **k):
+        return None
+
+    monkeypatch.setattr(S, "_http_client", lambda: FakeClient())
+    monkeypatch.setattr(S.asyncio, "sleep", no_sleep)
+    data = run(S._raw_get("https://x", {}))
+    assert data == {"ok": True}
+    assert calls["n"] == 2          # one 429 -> retried once, then 200
+
+
+def test_get_with_retry_gives_up(monkeypatch):
+    calls = {"n": 0}
+
+    class FakeClient:
+        async def get(self, *a, **k):
+            calls["n"] += 1
+            return _RetryResp(503)   # always failing
+
+    async def no_sleep(*a, **k):
+        return None
+
+    monkeypatch.setattr(S, "_http_client", lambda: FakeClient())
+    monkeypatch.setattr(S.asyncio, "sleep", no_sleep)
+    with pytest.raises(RuntimeError):
+        run(S._raw_get("https://x", {}))
+    assert calls["n"] == S.MAX_RETRIES + 1   # initial try + MAX_RETRIES
 
 
 # --------------------------------------------------------------------------- #
