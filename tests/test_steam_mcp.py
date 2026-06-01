@@ -808,6 +808,42 @@ def test_analyze_library_backlog_truncation(monkeypatch):
     assert S.LibraryAnalysisInput(steamid="x").backlog_limit == 100
 
 
+def test_analyze_library_abandoned_decoupled(monkeypatch):
+    # 5 abandoned games (played, last launched long ago). abandoned_limit must
+    # govern the Abandoned list on its own — backlog_limit must NOT shrink it.
+    old = 1_500_000_000  # well before a 365-day cutoff from 'now'
+    games = [
+        {"appid": i, "name": ch, "playtime_forever": 120, "rtime_last_played": old + i}
+        for i, ch in enumerate("ABCDE", start=1)
+    ]
+    payload = {"response": {"game_count": 5, "games": games}}
+
+    async def fake_steam(path, params, **k):
+        return payload
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+
+    def abandoned_count(**kw):
+        out = run(S.steam_analyze_library(S.LibraryAnalysisInput(
+            steamid="76561197960287930", response_format="json", **kw)))
+        return len(json.loads(out)["abandoned"])
+
+    # backlog_limit must not touch the abandoned list (the decoupling bug fix).
+    assert abandoned_count(backlog_limit=1) == abandoned_count(backlog_limit=100) == 5
+    # abandoned_limit is what actually bounds it.
+    assert abandoned_count(abandoned_limit=2) == 2
+
+    md = run(S.steam_analyze_library(S.LibraryAnalysisInput(
+        steamid="76561197960287930", abandoned_limit=2)))
+    assert "5 total, showing 2" in md
+
+    j = json.loads(run(S.steam_analyze_library(S.LibraryAnalysisInput(
+        steamid="76561197960287930", abandoned_limit=2, response_format="json"))))
+    assert j["abandoned_truncated"] is True
+    # Defaults: dedicated 25-game abandoned cap, independent of backlog.
+    assert S.LibraryAnalysisInput(steamid="x").abandoned_limit == 25
+
+
 def test_app_details_features(monkeypatch):
     data = {"123": {"success": True, "data": {
         "name": "Game", "type": "game", "is_free": False,

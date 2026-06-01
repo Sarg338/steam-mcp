@@ -13,6 +13,9 @@ venv/
 # Agent working notes — local only, not for the public repo
 CLAUDE.md
 
+# Cygwin/MSYS crash dumps (build/runtime cruft)
+*.stackdump
+
 # Signing key material (mcpb sign --self-signed) — never commit private keys
 *.pem
 

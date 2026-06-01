@@ -3517,6 +3517,13 @@ class LibraryAnalysisInput(BaseModel):
         "slice of it.",
         ge=0, le=100,
     )
+    abandoned_limit: int = Field(
+        default=25,
+        description="How many 'abandoned' games to list (0-100). Independent of "
+        "backlog_limit; the list is sorted most-stale-first, so this keeps the games "
+        "you dropped longest ago.",
+        ge=0, le=100,
+    )
     stale_days: int = Field(
         default=365,
         description="A played game untouched for at least this many days is "
@@ -3557,7 +3564,8 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
     recommending, not just the early letters of the alphabet.
 
     Args:
-        params (LibraryAnalysisInput): steamid, top_limit, backlog_limit, stale_days.
+        params (LibraryAnalysisInput): steamid, top_limit, backlog_limit,
+            abandoned_limit, stale_days.
 
     Returns:
         str: Markdown or JSON with summary stats, playtime_buckets, top_played,
@@ -3630,8 +3638,9 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
         abandoned = [
             _row(g) for g in sorted(
                 abandoned_src, key=lambda g: g.get("rtime_last_played", 0)
-            )[: params.backlog_limit]
+            )[: params.abandoned_limit]
         ]
+        abandoned_truncated = len(abandoned) < len(abandoned_src)
         backlog = [
             {"appid": g.get("appid"), "name": g.get("name")}
             for g in sorted(never, key=lambda g: (g.get("name") or "").lower())[
@@ -3661,6 +3670,7 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
                 "backlog_never_played": backlog,
                 "backlog_truncated": backlog_truncated,
                 "abandoned": abandoned,
+                "abandoned_truncated": abandoned_truncated,
             })
 
         lines = [
@@ -3692,7 +3702,10 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
             lp = f", last played {g['last_played']}" if g["last_played"] else ""
             lines.append(f"- **{g['name']}** — {g['hours']}h{lp}")
         if abandoned:
-            lines += ["", f"## Abandoned (played, untouched {params.stale_days}+ days)"]
+            head = f"## Abandoned (played, untouched {params.stale_days}+ days)"
+            if abandoned_truncated:
+                head += f" — {len(abandoned_src)} total, showing {len(abandoned)}"
+            lines += ["", head]
             for g in abandoned:
                 lines.append(
                     f"- **{g['name']}** — {g['hours']}h, last played {g['last_played']}"

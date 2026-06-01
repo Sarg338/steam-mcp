@@ -3,6 +3,23 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.5.0]
+
+### Added
+- **`steam_analyze_library` gains an `abandoned_limit` parameter** (default 25,
+  range 0–100). The "Abandoned" list now has its own control.
+
+### Fixed
+- **`backlog_limit` no longer truncates the Abandoned list.** Both the never-played
+  backlog and the abandoned-games list were sliced by the single `backlog_limit`,
+  so setting `backlog_limit=3` for a tight backlog silently shrank the unrelated
+  Abandoned list to 3 as well. The two are now independent (`abandoned_limit`
+  governs Abandoned). Since the abandoned list is sorted most-stale-first, its
+  default cap of 25 keeps the longest-dropped games. The Markdown header and a new
+  `abandoned_truncated` JSON field now report when it's truncated, mirroring
+  `backlog_truncated`. Additive (new optional param, new JSON field) — no removals,
+  backward-compatible.
+
 ## [1.4.3]
 
 ### Fixed
@@ -261,6 +278,7 @@ changes will require a 2.0.
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[1.5.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.5.0
 [1.4.3]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.4.3
 [1.4.2]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.4.2
 [1.4.1]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.4.1
