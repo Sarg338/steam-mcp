@@ -5,6 +5,7 @@ no network and no API key required. Run with: pytest -q
 """
 import asyncio
 import json
+import logging
 
 import pytest
 
@@ -740,6 +741,13 @@ def test_rate_limiter_bucket(monkeypatch):
     burst_sleeps, after = run(go())
     assert burst_sleeps == 0
     assert after == 1
+
+
+def test_http_logging_silenced():
+    # The API key rides in request URLs (?key=); httpx/httpcore log those at INFO,
+    # so importing the server must have quieted them to keep the key out of logs.
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("httpcore").level == logging.WARNING
 
 
 # --------------------------------------------------------------------------- #

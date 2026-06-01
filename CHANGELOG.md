@@ -3,6 +3,14 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.2]
+
+### Fixed
+- **Keep the API key out of logs.** `httpx`/`httpcore` log full request URLs at
+  INFO, and Steam requires the key as a `?key=` query parameter — so those loggers
+  are now quieted to `WARNING`, preventing the key from ever landing in logs the
+  host might capture. (Complements the existing error-message scrubbing.)
+
 ## [1.4.1]
 
 ### Added
@@ -240,6 +248,7 @@ changes will require a 2.0.
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[1.4.2]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.4.2
 [1.4.1]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.4.1
 [1.4.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.4.0
 [1.3.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.3.0

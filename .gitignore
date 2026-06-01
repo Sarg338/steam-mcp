@@ -10,6 +10,9 @@ venv/
 .mypy_cache/
 .ruff_cache/
 
+# Agent working notes — local only, not for the public repo
+CLAUDE.md
+
 # Signing key material (mcpb sign --self-signed) — never commit private keys
 *.pem
 
