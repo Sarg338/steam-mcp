@@ -27,6 +27,7 @@ import re
 import time
 from enum import Enum
 from typing import Any, Optional
+from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -114,6 +115,12 @@ CACHE_TTL_NEWS = 900            # news / patch notes change slowly (15 min)
 CACHE_TTL_REVIEWS = 300         # lifetime review summary (5 min)
 CACHE_TTL_WORKSHOP = 3600       # workshop item metadata (slow-changing)
 CACHE_TTL_GROUP = 3600          # group name / url / member count (slow-changing)
+CACHE_TTL_MARKET = 600          # market price (10 min — also eases the tight rate limit)
+
+# CS2/CSGO item wear tiers, as they appear in a market_hash_name's trailing (…).
+CS_EXTERIORS = (
+    "Factory New", "Minimal Wear", "Field-Tested", "Well-Worn", "Battle-Scarred",
+)
 
 
 class _TTLCache:
@@ -4524,6 +4531,168 @@ async def steam_get_inventory(params: InventoryInput) -> str:
             lines.append(f"- **{r['name'] or 'Unknown item'}**{qty}{typ}{flagstr}")
         if len(rows) > 50:
             lines.append(f"- …and {len(rows) - 50} more distinct items")
+        return "\n".join(lines)
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
+
+
+def _parse_cs_attributes(hash_name: str) -> dict:
+    """Parse CS2/CSGO attributes encoded in a market_hash_name (no request).
+
+    e.g. 'StatTrak™ AK-47 | Redline (Field-Tested)' or '★ Karambit | Doppler
+    (Factory New)'. Rarity/type are NOT in the hash name — those come from the
+    item's `type` (e.g. 'Classified Rifle') via the market lookup.
+    """
+    attrs = {"exterior": None, "stattrak": False, "souvenir": False, "star": False}
+    m = re.search(r"\(([^)]+)\)\s*$", hash_name)
+    if m and m.group(1) in CS_EXTERIORS:
+        attrs["exterior"] = m.group(1)
+    attrs["stattrak"] = "StatTrak" in hash_name      # StatTrak™
+    attrs["souvenir"] = hash_name.startswith("Souvenir ")
+    attrs["star"] = hash_name.startswith("★")        # knives / gloves
+    return attrs
+
+
+class MarketPriceInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    appid: int = Field(
+        ..., ge=1,
+        description="App the item belongs to: 730 = CS2, 440 = TF2, 570 = Dota 2, "
+        "753 = Steam Community items.",
+    )
+    market_hash_name: str = Field(
+        ..., min_length=1, max_length=300,
+        description="The item's exact Market Hash Name — it encodes the variant, so "
+        "include condition/quality prefixes, e.g. 'AK-47 | Redline (Field-Tested)', "
+        "'StatTrak™ AWP | Asiimov (Field-Tested)', 'Souvenir ...'. Copy it from "
+        "the item's Community Market page.",
+    )
+    currency: int = Field(
+        default=1, ge=1, le=41,
+        description="Steam currency code: 1=USD, 2=GBP, 3=EUR, 5=RUB, 9=JPY, "
+        "20=BRL, 23=CNY, etc.",
+    )
+    include_item_details: bool = Field(
+        default=True,
+        description="Also look up the item's type/rarity and listing count (one "
+        "extra request). Set false for price only.",
+    )
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+@mcp.tool(
+    name="steam_get_market_price",
+    annotations={
+        "title": "Get Steam Community Market Price",
+        "readOnlyHint": True, "destructiveHint": False,
+        "idempotentHint": True, "openWorldHint": True,
+    },
+)
+async def steam_get_market_price(params: MarketPriceInput) -> str:
+    """Get the Community Market price for a single item, with rarity and condition.
+
+    Returns the current lowest and median sale price plus 24-hour volume, and (by
+    default) the item's type/rarity (e.g. "Classified Rifle", "Mythical Bow") and
+    listing count. For CS2 it also surfaces the wear/exterior, StatTrak™, Souvenir,
+    and ★ flags parsed from the name. The item is identified by its exact Market
+    Hash Name — which already encodes the variant (condition, StatTrak, etc.).
+
+    No API key required. Uses Steam's Community Market endpoints, which are
+    undocumented and tightly rate-limited; results are cached briefly, and an item
+    with no current listings reports the price as unavailable.
+
+    Args:
+        params (MarketPriceInput): appid, market_hash_name, currency,
+            include_item_details.
+
+    Returns:
+        str: Markdown or JSON. lowest_price, median_price, volume_24h, listings,
+        type (rarity + category), CS2 attributes, and the market URL.
+    """
+    try:
+        po = await _raw_get(
+            "https://steamcommunity.com/market/priceoverview/",
+            {"appid": params.appid, "currency": params.currency,
+             "market_hash_name": params.market_hash_name},
+            cache_ttl=CACHE_TTL_MARKET,
+        )
+        priced = bool(po) and po.get("success") and (
+            po.get("lowest_price") or po.get("median_price"))
+
+        item_type = None
+        listings = None
+        if params.include_item_details:
+            try:
+                sr = await _raw_get(
+                    "https://steamcommunity.com/market/search/render/",
+                    {"appid": params.appid, "norender": 1, "count": 10,
+                     "currency": params.currency, "query": params.market_hash_name},
+                    cache_ttl=CACHE_TTL_MARKET,
+                )
+                hit = next(
+                    (r for r in (sr.get("results") or [])
+                     if r.get("hash_name") == params.market_hash_name), None)
+                if hit:
+                    item_type = (hit.get("asset_description") or {}).get("type")
+                    listings = hit.get("sell_listings")
+            except Exception:  # noqa: BLE001
+                pass  # details are best-effort; price still returned
+
+        cs = _parse_cs_attributes(params.market_hash_name) if params.appid == 730 else {}
+        url = ("https://steamcommunity.com/market/listings/"
+               f"{params.appid}/{quote(params.market_hash_name)}")
+
+        if not priced:
+            base = (f"No current Community Market listings for '{params.market_hash_name}' "
+                    f"(app {params.appid}). Check the exact Market Hash Name and appid"
+                    + (f"; it's a {item_type}." if item_type else "."))
+            if params.response_format == ResponseFormat.JSON:
+                return _dump({"appid": params.appid,
+                              "market_hash_name": params.market_hash_name,
+                              "available": False, "type": item_type,
+                              "attributes": cs, "market_url": url})
+            return base
+
+        summary = {
+            "appid": params.appid,
+            "market_hash_name": params.market_hash_name,
+            "currency": params.currency,
+            "available": True,
+            "lowest_price": po.get("lowest_price"),
+            "median_price": po.get("median_price"),
+            "volume_24h": po.get("volume"),
+            "listings": listings,
+            "type": item_type,
+            "attributes": cs,
+            "market_url": url,
+        }
+        if params.response_format == ResponseFormat.JSON:
+            return _dump(summary)
+
+        lines = [f"# Market: {params.market_hash_name} (app {params.appid})"]
+        price_bits = [f"**Lowest** {po.get('lowest_price')}"]
+        if po.get("median_price"):
+            price_bits.append(f"**Median** {po.get('median_price')}")
+        if po.get("volume"):
+            price_bits.append(f"**Sold (24h)** {po.get('volume')}")
+        lines.append("- " + "  |  ".join(price_bits))
+        if item_type:
+            lines.append(f"- **Type / rarity**: {item_type}")
+        if cs.get("exterior") or cs.get("stattrak") or cs.get("souvenir") or cs.get("star"):
+            flags = []
+            if cs.get("star"):
+                flags.append("★")
+            if cs.get("stattrak"):
+                flags.append("StatTrak™")
+            if cs.get("souvenir"):
+                flags.append("Souvenir")
+            if cs.get("exterior"):
+                flags.append(cs["exterior"])
+            lines.append(f"- **Condition**: {', '.join(flags)}")
+        if listings is not None:
+            lines.append(f"- **Listings**: {listings:,}")
+        lines.append(f"- {url}")
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001
         return _handle_error(e)

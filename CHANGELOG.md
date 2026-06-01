@@ -3,6 +3,21 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.3.0]
+
+### Added
+- `steam_get_market_price` — Community Market price for a single item: current
+  lowest + median price and 24-hour volume, plus the item's type/rarity (e.g.
+  "Classified Rifle", "Mythical Bow") and listing count, and — for CS2 — the
+  wear/exterior, StatTrak™, Souvenir, and ★ flags parsed from the name. No API
+  key. Uses Steam's Community Market endpoints (undocumented + tightly
+  rate-limited), so prices are cached briefly and best-effort.
+
+### Changed
+- Non-goals updated: market *current* prices are now in scope (read-only, via the
+  official `priceoverview` endpoint). Market *history* (needs a logged-in session),
+  player-count history, and write/trade actions remain out of scope.
+
 ## [1.2.0]
 
 ### Added
@@ -196,6 +211,7 @@ changes will require a 2.0.
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[1.3.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.3.0
 [1.2.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.0.0

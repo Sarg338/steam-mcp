@@ -60,6 +60,7 @@ Account-independent (works for any game, no SteamID needed):
 - "What was in the latest *Dota 2* update?"
 - "How much does *Hades II* cost and what genres is it?"
 - "What DLC does *Cities: Skylines* have, and is any of it on sale?"
+- "What's the Community Market price of a Field-Tested AK-47 | Redline?"
 - "Is *Elden Ring* a soulslike? What are its community tags?"
 - "Find co-op roguelikes under $20 that are well-reviewed."
 - "Should I buy *Hades II* right now — and how are its recent reviews trending?"
@@ -101,6 +102,7 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_get_store_highlights` | **Top sellers, new releases, or coming soon** | no |
 | `steam_get_wishlist` | **A user's wishlist, with live prices + what's on sale** | yes |
 | `steam_get_inventory` | **A user's inventory** — game items or Steam Community items (cards, emoticons…), with tradable/marketable flags | no |
+| `steam_get_market_price` | **Community Market price** for an item (lowest/median/24h volume) + type/rarity + CS2 condition | no |
 | `steam_get_player_badges` | Badges + the XP breakdown behind a Steam level | yes |
 | `steam_get_package_details` | Package/bundle price + included games | no |
 | `steam_compare_players` | Shared games between two users, with playtime | yes |
@@ -132,6 +134,10 @@ the tools) and **resources** (reference Steam entities by URI):
 > `review_filter='recent'` computes that score itself by paginating the newest
 > reviews within `day_range` days (default 30). For games with a very high volume
 > of recent reviews it counts up to ~600 and marks the result `sampled: true`.
+
+> **Market prices:** `steam_get_market_price` uses Steam's Community Market
+> endpoints, which are undocumented and tightly rate-limited. Results are cached
+> briefly; an item with no current listings reports its price as unavailable.
 
 ---
 

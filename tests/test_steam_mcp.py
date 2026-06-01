@@ -642,6 +642,53 @@ def test_inventory_private(monkeypatch):
     assert "private" in out.lower()
 
 
+def test_parse_cs_attributes():
+    a = S._parse_cs_attributes("StatTrak™ AK-47 | Redline (Field-Tested)")
+    assert a["exterior"] == "Field-Tested" and a["stattrak"] is True
+    assert a["souvenir"] is False and a["star"] is False
+    b = S._parse_cs_attributes("Souvenir AWP | Dragon Lore (Factory New)")
+    assert b["exterior"] == "Factory New" and b["souvenir"] is True
+    c = S._parse_cs_attributes("★ Karambit | Doppler (Minimal Wear)")
+    assert c["star"] is True and c["exterior"] == "Minimal Wear"
+    d = S._parse_cs_attributes("Mann Co. Supply Crate Key")
+    assert d["exterior"] is None and d["stattrak"] is False
+
+
+def test_market_price(monkeypatch):
+    async def fake_raw(url, params, cache_ttl=0):
+        if "priceoverview" in url:
+            return {"success": True, "lowest_price": "$40.98",
+                    "median_price": "$42.74", "volume": "97"}
+        if "search/render" in url:
+            return {"success": 1, "results": [
+                {"name": "AK-47 | Redline (Field-Tested)",
+                 "hash_name": "AK-47 | Redline (Field-Tested)",
+                 "sell_listings": 1124, "sell_price_text": "$40.98",
+                 "asset_description": {"type": "Classified Rifle"}}]}
+        return {}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    out = run(S.steam_get_market_price(S.MarketPriceInput(
+        appid=730, market_hash_name="AK-47 | Redline (Field-Tested)",
+        response_format="json")))
+    d = json.loads(out)
+    assert d["available"] is True
+    assert d["lowest_price"] == "$40.98" and d["median_price"] == "$42.74"
+    assert d["volume_24h"] == "97" and d["listings"] == 1124
+    assert d["type"] == "Classified Rifle"
+    assert d["attributes"]["exterior"] == "Field-Tested"
+
+
+def test_market_price_unavailable(monkeypatch):
+    async def fake_raw(url, params, cache_ttl=0):
+        return {"success": True}      # priceoverview with no listings; search empty
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    out = run(S.steam_get_market_price(S.MarketPriceInput(
+        appid=730, market_hash_name="Nonexistent Item")))
+    assert "no current" in out.lower()
+
+
 # --------------------------------------------------------------------------- #
 # Tool logic with mocked HTTP
 # --------------------------------------------------------------------------- #
@@ -924,6 +971,7 @@ def test_tools_registered():
     assert "steam_get_workshop_item" in by_name
     assert "steam_get_user_groups" in by_name
     assert "steam_get_inventory" in by_name
+    assert "steam_get_market_price" in by_name
     # the reviews tool takes the reviews input (has appid + review_filter),
     # not _fmt_review's raw-dict signature
     schema = json.dumps(by_name["steam_get_app_reviews"].inputSchema)
