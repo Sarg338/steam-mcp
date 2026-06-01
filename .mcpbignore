@@ -11,6 +11,7 @@ build/
 dist/
 .venv/
 venv/
+.ruff_cache/
 
 # OS / shell crash cruft
 *.stackdump

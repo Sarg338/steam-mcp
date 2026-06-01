@@ -8,6 +8,7 @@ venv/
 .env
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 
 # Packaging outputs (build them on release; don't commit)
 *.mcpb
