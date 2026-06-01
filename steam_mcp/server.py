@@ -534,6 +534,19 @@ def _minutes_to_hours(minutes: Optional[int]) -> float:
     return round((minutes or 0) / 60.0, 1)
 
 
+def _hours_str(minutes: Optional[int]) -> str:
+    """Display hours, but never render a *launched* game (>0 min) as a flat '0.0'.
+
+    A game played 1-5 minutes rounds to 0.0h, which looks like a contradiction next
+    to a 'played'/'abandoned' classification (those use playtime_forever > 0, not
+    the rounded hours). Show '<0.1' for launched-but-tiny playtime; 0 minutes stays
+    '0.0'.
+    """
+    m = minutes or 0
+    h = _minutes_to_hours(m)
+    return "<0.1" if m > 0 and h == 0 else f"{h}"
+
+
 def _dump(payload: Any) -> str:
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
@@ -3655,6 +3668,12 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
         game_count = len(games)
         cutoff = _time.time() - params.stale_days * 86400
 
+        # Authoritative never-vs-played predicate, used everywhere below (the split,
+        # the buckets, the backlog/abandoned builders): played := playtime_forever
+        # (minutes) > 0. A game launched only briefly has a tiny positive playtime
+        # that *rounds* to 0.0h — it is still 'played'/abandonable, and renders as
+        # '<0.1h' (see _hours_str), never a contradictory '0.0h'. The '0h' bucket
+        # below is exactly minutes == 0, i.e. the never-played set.
         total_min = sum(g.get("playtime_forever", 0) for g in games)
         played = [g for g in games if g.get("playtime_forever", 0) > 0]
         never = [g for g in games if g.get("playtime_forever", 0) == 0]
@@ -3677,10 +3696,12 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
                 buckets["over_100h"] += 1
 
         def _row(g):
+            mins = g.get("playtime_forever")
             return {
                 "appid": g.get("appid"),
                 "name": g.get("name"),
-                "hours": _minutes_to_hours(g.get("playtime_forever")),
+                "hours": _minutes_to_hours(mins),
+                "hours_str": _hours_str(mins),
                 "last_played": _ts_to_date(g.get("rtime_last_played")),
             }
 
@@ -3789,7 +3810,7 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
         ]
         for g in top_played:
             lp = f", last played {g['last_played']}" if g["last_played"] else ""
-            lines.append(f"- **{g['name']}** — {g['hours']}h{lp}")
+            lines.append(f"- **{g['name']}** — {g['hours_str']}h{lp}")
         if abandoned:
             lines += [
                 "",
@@ -3798,7 +3819,7 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
             ]
             for g in abandoned:
                 lines.append(
-                    f"- **{g['name']}** — {g['hours']}h, last played {g['last_played']}"
+                    f"- **{g['name']}** — {g['hours_str']}h, last played {g['last_played']}"
                 )
         if backlog:
             lines += [

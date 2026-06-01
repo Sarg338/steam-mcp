@@ -963,6 +963,48 @@ def test_analyze_library_excludes_temp_clients(monkeypatch):
     assert S.LibraryAnalysisInput(steamid="x").exclude_temp_clients is True
 
 
+def test_hours_str_floor():
+    assert S._hours_str(0) == "0.0"      # truly never launched
+    assert S._hours_str(None) == "0.0"
+    assert S._hours_str(1) == "<0.1"     # launched 1-2 min -> rounds to 0.0h
+    assert S._hours_str(2) == "<0.1"
+    assert S._hours_str(6) == "0.1"      # 6 min = 0.1h, shown normally
+    assert S._hours_str(90) == "1.5"
+
+
+def test_analyze_library_tiny_playtime_render(monkeypatch):
+    # 2 minutes, launched in 2013: 'played'/abandoned but rounds to 0.0h.
+    games = [
+        {"appid": 1, "name": "A Virus Named TOM", "playtime_forever": 2,
+         "rtime_last_played": 1379462400},  # 2013-09-18
+        {"appid": 2, "name": "Untouched Game", "playtime_forever": 0,
+         "rtime_last_played": 0},
+    ]
+    payload = {"response": {"game_count": 2, "games": games}}
+
+    async def fake_steam(path, params, **k):
+        return payload
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+
+    d = json.loads(run(S.steam_analyze_library(S.LibraryAnalysisInput(
+        steamid="76561197960287930", stale_days=365, response_format="json"))))
+    # Consistent predicate: launched (>0 min) => played/abandoned, NOT backlog.
+    assert "A Virus Named TOM" in {g["name"] for g in d["abandoned"]}
+    assert "A Virus Named TOM" not in {g["name"] for g in d["backlog_never_played"]}
+    assert "Untouched Game" in {g["name"] for g in d["backlog_never_played"]}
+    assert d["summary"]["played_count"] == 1
+    assert d["playtime_buckets"]["0h"] == 1  # only the truly-untouched game
+    # Numeric hours still rounds to 0.0, but the display string is non-contradictory.
+    tom = next(g for g in d["abandoned"] if g["name"] == "A Virus Named TOM")
+    assert tom["hours"] == 0.0 and tom["hours_str"] == "<0.1"
+
+    md = run(S.steam_analyze_library(S.LibraryAnalysisInput(
+        steamid="76561197960287930", stale_days=365)))
+    assert "<0.1h, last played 2013-09-18" in md
+    assert "0.0h, last played 2013-09-18" not in md
+
+
 def test_app_details_features(monkeypatch):
     data = {"123": {"success": True, "data": {
         "name": "Game", "type": "game", "is_free": False,

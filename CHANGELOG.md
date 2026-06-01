@@ -3,6 +3,18 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.1]
+
+### Fixed
+- **No more "0.0h" on a game classified as played/abandoned.** A game launched only
+  briefly (1–2 minutes) has a positive `playtime_forever` that *rounds* to 0.0h, so
+  it correctly counted as played/abandoned but rendered as a contradictory "0.0h".
+  The never-vs-played predicate is unchanged and was already consistent everywhere
+  (`playtime_forever` minutes > 0; the `0h` bucket is exactly 0 minutes) — now
+  documented in code — and launched-but-tiny playtimes render as **`<0.1h`** instead
+  of `0.0h`. JSON rows gain a `hours_str` display field alongside the numeric
+  `hours` (which still rounds to 0.0, so the data stays exact). Additive field only.
+
 ## [1.7.0]
 
 ### Added
@@ -325,6 +337,7 @@ changes will require a 2.0.
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[1.7.1]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.1
 [1.7.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.0
 [1.6.1]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.6.1
 [1.6.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.6.0
