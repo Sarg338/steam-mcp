@@ -125,10 +125,17 @@ Restart your client and the Steam tools appear.
 ## Development
 
 ```bash
-pip install -e .
-python -m py_compile steam_mcp/server.py     # syntax check
+pip install -e ".[dev]"
+pytest -q                                     # run the test suite (no network needed)
+python -m py_compile steam_mcp/server.py      # syntax check
 npx @modelcontextprotocol/inspector python -m steam_mcp.server   # interactive test
 ```
+
+Static storefront/API responses (app & package details, store highlights, game
+schemas, global achievement percentages) are cached in-memory with a short TTL
+to ease the rate limit and speed up tools that fan out many lookups. Live data
+(player status, current players, wishlists, friends) is never cached. See
+[CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## License
 

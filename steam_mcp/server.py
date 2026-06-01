@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from enum import Enum
 from typing import Any, Optional
 
@@ -67,6 +68,59 @@ VISIBILITY_STATES = {
 
 PROFILE_URL_RE = re.compile(r"steamcommunity\.com/(profiles|id)/([^/?#]+)", re.IGNORECASE)
 STEAMID64_RE = re.compile(r"^7656\d{13}$")  # 17-digit SteamID64 starting 7656
+
+
+# --- Static-response cache (per-process, opt-in) -----------------------------
+CACHE_TTL_APPDETAILS = 600      # 10 min (price can change on sales)
+CACHE_TTL_PACKAGE = 3600
+CACHE_TTL_FEATURED = 300        # 5 min
+CACHE_TTL_SCHEMA = 86400        # achievement/stat definitions are static
+CACHE_TTL_GLOBAL_ACH = 3600
+
+
+class _TTLCache:
+    """Tiny in-memory TTL cache for static GET responses.
+
+    Keeps the server gentle on Steam's rate limit and speeds up tools that fan
+    out many lookups (wishlist enrichment, library/app detail comparisons). Only
+    static endpoints opt in via a positive cache_ttl; live data (player status,
+    current players, wishlists, friends) is never cached.
+    """
+
+    def __init__(self, maxsize: int = 256):
+        self._d: dict[str, tuple[float, Any]] = {}
+        self._max = maxsize
+
+    def get(self, key: str):
+        item = self._d.get(key)
+        if not item:
+            return None
+        expiry, value = item
+        if expiry < time.time():
+            self._d.pop(key, None)
+            return None
+        return value
+
+    def set(self, key: str, value: Any, ttl: float) -> None:
+        if len(self._d) >= self._max:
+            now = time.time()
+            for k in [k for k, (e, _) in self._d.items() if e < now]:
+                self._d.pop(k, None)
+            if len(self._d) >= self._max:
+                self._d.clear()
+        self._d[key] = (time.time() + ttl, value)
+
+    def clear(self) -> None:
+        self._d.clear()
+
+
+_CACHE = _TTLCache()
+
+
+def _cache_key(prefix: str, params: dict) -> str:
+    """Stable cache key from a path/URL + params, excluding the secret API key."""
+    items = sorted((k, v) for k, v in params.items() if k != "key")
+    return prefix + "?" + "&".join(f"{k}={v}" for k, v in items)
 
 
 # ---------------------------------------------------------------------------
@@ -115,30 +169,46 @@ def _get_api_key() -> str:
     return key
 
 
-async def _steam_get(path: str, params: dict[str, Any], *, with_key: bool = True) -> dict:
+async def _steam_get(path: str, params: dict[str, Any], *, with_key: bool = True,
+                     cache_ttl: float = 0) -> dict:
     """GET a Steam Web API endpoint and return parsed JSON.
 
     Args:
         path: Path after the host, e.g. "ISteamUser/GetFriendList/v1/".
         params: Query parameters (the API key is injected automatically).
         with_key: Whether to attach the configured API key.
+        cache_ttl: If > 0, cache the response for this many seconds. Use only for
+            static endpoints (e.g. game schemas); never for live/user data.
     """
+    ck = _cache_key(API_BASE + "/" + path, params) if cache_ttl else None
+    if ck is not None:
+        hit = _CACHE.get(ck)
+        if hit is not None:
+            return hit
     query = dict(params)
     if with_key:
         query["key"] = _get_api_key()
     async with httpx.AsyncClient() as client:
         resp = await client.get(f"{API_BASE}/{path}", params=query, timeout=HTTP_TIMEOUT)
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+    if ck is not None:
+        _CACHE.set(ck, data, cache_ttl)
+    return data
 
 
-async def _store_get(path: str, params: dict[str, Any]) -> Any:
+async def _store_get(path: str, params: dict[str, Any], cache_ttl: float = 0) -> Any:
     """GET a public storefront API endpoint (no key required)."""
-    return await _raw_get(f"{STORE_BASE}/{path}", params)
+    return await _raw_get(f"{STORE_BASE}/{path}", params, cache_ttl=cache_ttl)
 
 
-async def _raw_get(url: str, params: dict[str, Any]) -> Any:
+async def _raw_get(url: str, params: dict[str, Any], cache_ttl: float = 0) -> Any:
     """GET an arbitrary public Steam JSON endpoint (no key required)."""
+    ck = _cache_key(url, params) if cache_ttl else None
+    if ck is not None:
+        hit = _CACHE.get(ck)
+        if hit is not None:
+            return hit
     async with httpx.AsyncClient(follow_redirects=True) as client:
         resp = await client.get(
             url,
@@ -147,7 +217,10 @@ async def _raw_get(url: str, params: dict[str, Any]) -> Any:
             headers={"Accept": "application/json"},
         )
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+    if ck is not None:
+        _CACHE.set(ck, data, cache_ttl)
+    return data
 
 
 def _handle_error(e: Exception) -> str:
@@ -1011,7 +1084,9 @@ async def steam_get_game_schema(params: AppOnlyInput) -> str:
     """
     try:
         data = await _steam_get(
-            "ISteamUserStats/GetSchemaForGame/v2/", {"appid": params.appid}
+            "ISteamUserStats/GetSchemaForGame/v2/",
+            {"appid": params.appid},
+            cache_ttl=CACHE_TTL_SCHEMA,
         )
         game = data.get("game", {})
         ach = game.get("availableGameStats", {}).get("achievements", [])
@@ -1071,6 +1146,7 @@ async def steam_get_global_achievement_percentages(params: AppOnlyInput) -> str:
             "ISteamUserStats/GetGlobalAchievementPercentagesForApp/v2/",
             {"gameid": params.appid},
             with_key=False,  # this endpoint does not require a key
+            cache_ttl=CACHE_TTL_GLOBAL_ACH,
         )
         ach = data.get("achievementpercentages", {}).get("achievements", [])
         rows = sorted(
@@ -1185,6 +1261,7 @@ async def steam_get_app_details(params: AppDetailsInput) -> str:
         data = await _store_get(
             "appdetails",
             {"appids": params.appid, "cc": params.country_code, "l": "english"},
+            cache_ttl=CACHE_TTL_APPDETAILS,
         )
         entry = data.get(str(params.appid), {})
         if not entry.get("success"):
@@ -1522,7 +1599,8 @@ async def steam_get_app_reviews(params: AppReviewsInput) -> str:
 
 async def _fetch_featured(cc: str) -> dict:
     """Fetch the storefront featuredcategories payload (no key required)."""
-    return await _store_get("featuredcategories", {"cc": cc, "l": "english"})
+    return await _store_get("featuredcategories", {"cc": cc, "l": "english"},
+                            cache_ttl=CACHE_TTL_FEATURED)
 
 
 def _featured_rows(items: list, limit: int) -> list:
@@ -1552,6 +1630,7 @@ async def _app_price(appid: int, cc: str) -> dict:
                 "l": "english",
                 "filters": "basic,price_overview",
             },
+            cache_ttl=CACHE_TTL_APPDETAILS,
         )
         entry = data.get(str(appid), {})
         if not entry.get("success"):
@@ -1871,7 +1950,7 @@ async def steam_get_app_news(params: AppNewsInput) -> str:
         lines = [f"# News for app {params.appid}", ""]
         for r in rows:
             when = (
-                _dt.datetime.utcfromtimestamp(r["date"]).strftime("%Y-%m-%d")
+                _dt.datetime.fromtimestamp(r["date"], _dt.timezone.utc).strftime("%Y-%m-%d")
                 if r["date"]
                 else "?"
             )
@@ -2033,6 +2112,7 @@ async def steam_get_package_details(params: PackageDetailsInput) -> str:
         data = await _store_get(
             "packagedetails",
             {"packageids": params.packageid, "cc": params.country_code, "l": "english"},
+            cache_ttl=CACHE_TTL_PACKAGE,
         )
         entry = data.get(str(params.packageid), {})
         if not entry.get("success"):
@@ -2212,7 +2292,7 @@ def _ts_to_date(ts):
         if not ts or ts < 1_000_000_000:
             return None
         import datetime as _dt
-        return _dt.datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d")
+        return _dt.datetime.fromtimestamp(ts, _dt.timezone.utc).strftime("%Y-%m-%d")
     except Exception:  # noqa: BLE001
         return None
 

@@ -25,3 +25,6 @@ _pack_only.bat
 .mypy_cache/
 .pytest_cache/
 PUBLISHING.md
+
+# Tests are not needed in the runtime bundle
+tests/
