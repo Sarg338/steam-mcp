@@ -19,6 +19,7 @@ this server beyond the key you set yourself.
 Account / profile (needs a public profile):
 - "Who's on my Steam friends list, and who's online right now?"
 - "Which of my friends own *Helldivers 2* — and who's playing it right now?"
+- "It's game night — what co-op games do my online friends and I all own?"
 - "What's my most-played game, and how many hours?"
 - "Which achievements am I still missing in Hollow Knight?"
 - "What are my career stats in *Team Fortress 2*?"
@@ -50,6 +51,7 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_get_player_summary` | Status (Online/Away/In-Game…), current game, for 1–100 users | yes |
 | `steam_get_friend_list` | Friends enriched with name + live status | yes |
 | `steam_find_friends_who_own` | **Which friends own (or are playing) a game** — "who can I play X with" | yes |
+| `steam_plan_coop_night` | **Co-op games the host + friends all own**, ranked by owners, with who's online now | yes |
 | `steam_get_owned_games` | Owned games with total/recent hours (sortable) | yes |
 | `steam_analyze_library` | **Backlog, playtime distribution, abandoned games** across a whole library | yes |
 | `steam_get_recently_played_games` | Last-2-weeks playtime | yes |

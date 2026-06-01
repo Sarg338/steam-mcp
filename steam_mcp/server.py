@@ -83,6 +83,11 @@ CURRENCY_SYMBOLS = {
     "ILS": "₪", "KZT": "₸", "CRC": "₡",
 }
 
+# Steam store "supported player" category IDs that indicate co-op play, used to
+# detect co-op games from IStoreBrowseService/GetItems. 9=Co-op, 24=Shared/Split
+# Screen, 38=Online Co-op, 39=LAN Co-op.
+COOP_CATEGORY_IDS = {9, 24, 38, 39}
+
 PROFILE_URL_RE = re.compile(r"steamcommunity\.com/(profiles|id)/([^/?#]+)", re.IGNORECASE)
 STEAMID64_RE = re.compile(r"^7656\d{13}$")  # 17-digit SteamID64 starting 7656
 
@@ -3788,6 +3793,236 @@ async def steam_recommend(params: RecommendInput) -> str:
             else:
                 price = ""
             lines.append(f"- **{r['name']}** (appid {r['appid']}){price}{why}")
+        return "\n".join(lines)
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
+
+
+async def _owned_set(sid: str) -> Optional[set]:
+    """Return a user's owned appids as a set, or None if their library is private."""
+    d = await _steam_get(
+        "IPlayerService/GetOwnedGames/v1/",
+        {"steamid": sid, "include_appinfo": 0, "include_played_free_games": 1},
+    )
+    resp = d.get("response", {})
+    if not resp:
+        return None
+    return {g.get("appid") for g in resp.get("games", []) if g.get("appid")}
+
+
+async def _items_coop(appids: list[int]) -> dict:
+    """Batched GetItems -> {appid: {"name": str, "coop": bool}} (no key).
+
+    Co-op is read from `categories.supported_player_categoryids` against the known
+    co-op category IDs. Chunked so request URLs stay reasonable.
+    """
+    if not appids:
+        return {}
+
+    async def _chunk(ids):
+        body = {
+            "ids": [{"appid": a} for a in ids],
+            "context": {"language": "english", "country_code": "US", "steam_realm": 1},
+            "data_request": {"include_basic_info": True, "include_categories": True},
+        }
+        data = await _steam_get(
+            "IStoreBrowseService/GetItems/v1/",
+            {"input_json": json.dumps(body, separators=(",", ":"))},
+            with_key=False, cache_ttl=CACHE_TTL_TAGS,
+        )
+        out = {}
+        for it in (data.get("response") or {}).get("store_items", []):
+            cats = ((it.get("categories") or {}).get("supported_player_categoryids")) or []
+            out[it.get("appid")] = {
+                "name": it.get("name"),
+                "coop": bool(set(cats) & COOP_CATEGORY_IDS),
+            }
+        return out
+
+    chunks = [appids[i:i + 50] for i in range(0, len(appids), 50)]
+    merged = {}
+    for part in await _gather_limited([_chunk(c) for c in chunks]):
+        merged.update(part)
+    return merged
+
+
+def _is_online(p: dict) -> bool:
+    """True if a player summary indicates online or in-game (not Offline)."""
+    return bool(p) and (p.get("personastate", 0) != 0 or bool(p.get("gameextrainfo")))
+
+
+class PlanCoopNightInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    steamid: str = Field(
+        ..., min_length=1, max_length=200,
+        description="The host whose library to match against friends. SteamID64, "
+        "vanity, or profile URL.",
+    )
+    friends: list[str] = Field(
+        default_factory=list, max_length=50,
+        description="Optional explicit group (SteamID64s / vanity names). If omitted, "
+        "uses the host's friends (online ones by default).",
+    )
+    online_only: bool = Field(
+        default=True,
+        description="When the group is derived from the friend list, include only "
+        "friends online right now. Ignored when 'friends' is given.",
+    )
+    max_friends: int = Field(
+        default=20, ge=1, le=100,
+        description="Max friends to check when deriving the group (bounds lookups).",
+    )
+    min_friends_owning: int = Field(
+        default=1, ge=1, le=50,
+        description="A game must be owned by the host AND at least this many group "
+        "members to be suggested.",
+    )
+    limit: int = Field(default=20, ge=1, le=50, description="Max co-op games to list.")
+    country_code: str = Field(default="us", min_length=2, max_length=2)
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+@mcp.tool(
+    name="steam_plan_coop_night",
+    annotations={
+        "title": "Plan a Steam Co-op Night",
+        "readOnlyHint": True, "destructiveHint": False,
+        "idempotentHint": True, "openWorldHint": True,
+    },
+)
+async def steam_plan_coop_night(params: PlanCoopNightInput) -> str:
+    """Find co-op games the host and their friends all own — for game night.
+
+    Cross-references the host's library with friends' libraries, keeps games that
+    support co-op, and ranks them by how many of the group own each. By default the
+    group is the host's friends who are ONLINE right now (the "tonight" framing);
+    pass an explicit `friends` list to plan with specific people, or
+    online_only=false for everyone. Requires the host's friend list + Game Details
+    Public, and each friend's Game Details Public (private ones are skipped and
+    counted). Needs an API key.
+
+    Args:
+        params (PlanCoopNightInput): steamid (host), friends, online_only,
+            max_friends, min_friends_owning, limit, country_code.
+
+    Returns:
+        str: Markdown or JSON. the group (+ who's online), how many libraries were
+        checked, and co-op games ranked by how many of the group own each.
+    """
+    try:
+        host = await _resolve_steamid(params.steamid)
+
+        if params.friends:
+            group, seen = [], set()
+            for f in params.friends:
+                try:
+                    g = await _resolve_steamid(f)
+                except Exception:  # noqa: BLE001
+                    continue
+                if g != host and g not in seen:
+                    seen.add(g)
+                    group.append(g)
+            if not group:
+                return "Couldn't resolve any of the given friends."
+            summaries = await _summaries_for(group)
+            derived = False
+        else:
+            fdata = await _steam_get(
+                "ISteamUser/GetFriendList/v1/",
+                {"steamid": host, "relationship": "friend"},
+            )
+            fids = [f["steamid"] for f in fdata.get("friendslist", {}).get("friends", [])]
+            if not fids:
+                return ("No friends returned — the host's friend list is likely "
+                        "private (set Friends List to Public).")
+            summaries = await _summaries_for(fids)
+            group = ([g for g in fids if _is_online(summaries.get(g, {}))]
+                     if params.online_only else fids)
+            if params.online_only and not group:
+                return ("None of the host's friends are online right now — try "
+                        "online_only=false, or pass an explicit friends list.")
+            group = group[: params.max_friends]
+            derived = True
+
+        host_owned = await _owned_set(host)
+        if host_owned is None:
+            return ("Can't plan — the host's Game Details are private (set them to "
+                    "Public).")
+
+        member_sets = await _gather_limited([_owned_set(g) for g in group])
+        owners_by_app: dict = {}
+        private = 0
+        checked = []
+        for g, s in zip(group, member_sets, strict=True):
+            if s is None:
+                private += 1
+                continue
+            checked.append(g)
+            for a in (s & host_owned):
+                owners_by_app.setdefault(a, []).append(g)
+
+        candidates = [(a, owners) for a, owners in owners_by_app.items()
+                      if len(owners) >= params.min_friends_owning]
+        if not candidates:
+            return ("No shared games among the host and the selected friends "
+                    "(with public libraries). Try more friends or online_only=false.")
+        candidates.sort(key=lambda x: len(x[1]), reverse=True)
+        coop_info = await _items_coop([a for a, _ in candidates[:150]])
+
+        rows = []
+        for a, owners in candidates[:150]:
+            ci = coop_info.get(a)
+            if not ci or not ci.get("coop"):
+                continue
+            rows.append({
+                "appid": a, "name": ci.get("name") or f"app {a}",
+                "owner_count": len(owners),
+                "owners": [summaries.get(o, {}).get("personaname", "Unknown")
+                           for o in owners],
+            })
+            if len(rows) >= params.limit:
+                break
+
+        online_names = [summaries.get(g, {}).get("personaname", "Unknown")
+                        for g in checked if _is_online(summaries.get(g, {}))]
+
+        if params.response_format == ResponseFormat.JSON:
+            return _dump({
+                "host": host,
+                "group_size": len(group),
+                "checked": len(checked),
+                "private_or_unknown": private,
+                "online_now": online_names,
+                "count": len(rows),
+                "games": rows,
+            })
+
+        if derived:
+            grp_desc = (f"your {len(group)} online friends" if params.online_only
+                        else f"{len(group)} friends")
+        else:
+            grp_desc = ", ".join(summaries.get(g, {}).get("personaname", g)
+                                 for g in checked) or "your group"
+        lines = [
+            f"# Co-op night for {host}",
+            f"Group: {grp_desc}."
+            + (f" Online now: {', '.join(online_names)}." if online_names else ""),
+            f"Checked {len(checked)} libraries ({private} private/unknown).",
+            "",
+        ]
+        if rows:
+            lines.append("Co-op games you can play together (most-owned first):")
+            for r in rows:
+                shown = r["owners"][:5]
+                more = f" +{len(r['owners']) - 5} more" if len(r["owners"]) > 5 else ""
+                lines.append(
+                    f"- **{r['name']}** (appid {r['appid']}) — you + "
+                    f"{r['owner_count']} ({', '.join(shown)}{more})"
+                )
+        else:
+            lines.append("No co-op games shared across the group "
+                         "(everyone owns different things, or libraries are private).")
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001
         return _handle_error(e)

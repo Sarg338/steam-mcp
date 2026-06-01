@@ -3,6 +3,17 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.11.0]
+
+### Added
+- `steam_plan_coop_night` — find **co-op games the host and their friends all
+  own**, for game night. Intersects the host's library with friends' libraries,
+  keeps games that support co-op (detected from store category data in one batched
+  call), and ranks them by how many of the group own each. The group defaults to
+  the host's friends who are **online right now** (pass an explicit `friends` list
+  or `online_only=false` for everyone). Friends with private libraries are skipped
+  and counted. Concurrent, bounded by `max_friends`.
+
 ## [0.10.0]
 
 ### Added
@@ -131,6 +142,7 @@ All notable changes to this project are documented here. Versions follow
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[0.11.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.11.0
 [0.10.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.10.0
 [0.9.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.9.0
 [0.8.1]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.8.1

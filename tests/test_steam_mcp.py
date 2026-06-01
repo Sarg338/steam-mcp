@@ -348,6 +348,59 @@ def test_recommend_requires_basis():
 
 
 # --------------------------------------------------------------------------- #
+# 0.11.0: co-op night planner
+# --------------------------------------------------------------------------- #
+
+def test_plan_coop_night(monkeypatch):
+    host = "76561197960000001"
+    alice, bob, carol, dave = "2", "3", "4", "5"
+
+    async def fake_steam(path, params, **k):
+        if "GetFriendList" in path:
+            return {"friendslist": {"friends": [
+                {"steamid": alice}, {"steamid": bob},
+                {"steamid": carol}, {"steamid": dave}]}}
+        if "GetPlayerSummaries" in path:
+            names = {alice: "Alice", bob: "Bob", carol: "Carol", dave: "Dave"}
+            states = {alice: 1, bob: 1, carol: 0, dave: 1}   # carol offline
+            return {"response": {"players": [
+                {"steamid": i, "personaname": names.get(i, "?"),
+                 "personastate": states.get(i, 0)}
+                for i in params["steamids"].split(",")]}}
+        if "GetOwnedGames" in path:
+            libs = {host: [10, 20, 30], alice: [10, 20], bob: [10], dave: None}
+            ap = libs.get(params["steamid"])
+            if ap is None:
+                return {"response": {}}                       # dave: private
+            return {"response": {"game_count": len(ap),
+                                 "games": [{"appid": a} for a in ap]}}
+        if "GetItems" in path:
+            ij = json.loads(params["input_json"])
+            meta = {10: ("Co-op A", [9, 38]), 20: ("Co-op B", [24]),
+                    30: ("Solo", [2])}
+            return {"response": {"store_items": [
+                {"appid": x["appid"], "name": meta[x["appid"]][0],
+                 "categories": {"supported_player_categoryids": meta[x["appid"]][1]}}
+                for x in ij["ids"] if x["appid"] in meta]}}
+        return {}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    out = run(S.steam_plan_coop_night(
+        S.PlanCoopNightInput(steamid=host, response_format="json")))
+    d = json.loads(out)
+    # online group = Alice, Bob, Dave (Carol offline). Dave's library is private.
+    assert d["private_or_unknown"] == 1                       # Dave skipped
+    assert d["checked"] == 2                                  # Alice + Bob
+    # host owns {10,20,30}; Alice {10,20}, Bob {10} -> 10 owned by 2, 20 by 1
+    # 30 is solo (filtered out); 10 & 20 are co-op
+    names = {g["name"]: g["owner_count"] for g in d["games"]}
+    assert names == {"Co-op A": 2, "Co-op B": 1}
+    assert d["games"][0]["name"] == "Co-op A"                 # most-owned first
+    assert d["games"][0]["owners"] == ["Alice", "Bob"]
+    assert set(d["online_now"]) == {"Alice", "Bob"}
+
+
+# --------------------------------------------------------------------------- #
 # Tool logic with mocked HTTP
 # --------------------------------------------------------------------------- #
 
@@ -624,6 +677,7 @@ def test_tools_registered():
     assert "steam_discover" in by_name
     assert "steam_should_i_buy" in by_name
     assert "steam_recommend" in by_name
+    assert "steam_plan_coop_night" in by_name
     # the reviews tool takes the reviews input (has appid + review_filter),
     # not _fmt_review's raw-dict signature
     schema = json.dumps(by_name["steam_get_app_reviews"].inputSchema)
