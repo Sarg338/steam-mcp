@@ -1,0 +1,70 @@
+{
+  "manifest_version": "0.4",
+  "name": "steam-mcp",
+  "display_name": "Steam (read-only)",
+  "version": "0.2.0",
+  "description": "Read-only Steam: friends, games, playtime, achievements, sales, reviews, live player counts.",
+  "long_description": "A read-only Model Context Protocol server for the public Steam Web API and storefront. Ask about your friends and their live status, your owned games and playtime, achievement progress and rarity, plus account-independent things like what's on sale, review scores (lifetime and last-30-days), live concurrent player counts, and patch notes.\n\nBring your own key: each user supplies their own free Steam Web API key, requested securely on install. The server is strictly read-only — it never sends messages, changes status, launches games, or makes purchases. Note that friends lists, owned games, and achievements are only visible when the target Steam profile's privacy is set to Public.",
+  "author": {
+    "name": "Sarg",
+    "url": "https://github.com/Sarg338/steam-mcp"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Sarg338/steam-mcp.git"
+  },
+  "homepage": "https://github.com/Sarg338/steam-mcp",
+  "documentation": "https://github.com/Sarg338/steam-mcp#readme",
+  "support": "https://github.com/Sarg338/steam-mcp/issues",
+  "license": "MIT",
+  "keywords": ["steam", "valve", "games", "gaming", "achievements", "reviews"],
+  "privacy_policies": [
+    "https://github.com/Sarg338/steam-mcp/blob/main/PRIVACY.md"
+  ],
+  "server": {
+    "type": "uv",
+    "entry_point": "steam_mcp/server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run", "--directory", "${__dirname}", "python", "-m", "steam_mcp.server"],
+      "env": {
+        "STEAM_API_KEY": "${user_config.steam_api_key}"
+      }
+    }
+  },
+  "tools": [
+    { "name": "steam_resolve_vanity_url", "description": "Resolve a vanity name or profile URL to a SteamID64" },
+    { "name": "steam_get_player_summary", "description": "Profile and live status (Online/Away/In-Game) for 1-100 users" },
+    { "name": "steam_get_friend_list", "description": "A user's friends, enriched with name and live status" },
+    { "name": "steam_get_owned_games", "description": "Owned games with total and recent hours played" },
+    { "name": "steam_get_recently_played_games", "description": "Games played in the last two weeks" },
+    { "name": "steam_get_steam_level", "description": "A user's Steam community level" },
+    { "name": "steam_get_player_bans", "description": "VAC / game / community / economy ban status" },
+    { "name": "steam_get_player_achievements", "description": "Per-game unlocked vs locked achievements" },
+    { "name": "steam_get_game_schema", "description": "A game's full achievement and stat definitions" },
+    { "name": "steam_get_global_achievement_percentages", "description": "Global achievement rarity (unlock %)" },
+    { "name": "steam_search_apps", "description": "Search the store by title to find a game's appid" },
+    { "name": "steam_get_app_details", "description": "Store details: description, price, genres, release date" },
+    { "name": "steam_get_app_reviews", "description": "Review score and samples, lifetime or last-N-days" },
+    { "name": "steam_get_featured_specials", "description": "Games currently on sale (regional)" },
+    { "name": "steam_get_current_players", "description": "Live concurrent player count for a game" },
+    { "name": "steam_get_app_news", "description": "Recent news and patch notes for a game" }
+  ],
+  "tools_generated": false,
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "python": ">=3.10,<4.0"
+    }
+  },
+  "user_config": {
+    "steam_api_key": {
+      "type": "string",
+      "title": "Steam Web API Key",
+      "description": "Your personal Steam Web API key (32 hex characters). Get one free at https://steamcommunity.com/dev/apikey",
+      "sensitive": true,
+      "required": true
+    }
+  }
+}

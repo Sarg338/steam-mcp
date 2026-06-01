@@ -1,0 +1,31 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Sarg338/steam-mcp",
+  "description": "Read-only Steam: friends, games, playtime, achievements, sales, reviews, and live player counts.",
+  "title": "Steam (read-only)",
+  "repository": {
+    "url": "https://github.com/Sarg338/steam-mcp",
+    "source": "github"
+  },
+  "version": "0.2.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "steam-mcp",
+      "version": "0.2.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "STEAM_API_KEY",
+          "description": "Your personal Steam Web API key (free at https://steamcommunity.com/dev/apikey).",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}

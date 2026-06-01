@@ -1,0 +1,26 @@
+# NEVER ship secrets or local cruft inside the .mcpb bundle.
+.env
+.env.example
+
+# Python caches / build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Packaging outputs / dev helpers (explicit names; avoid glob patterns like
+# _*.py that would also match __init__.py)
+*.mcpb
+server.json
+_build_dist.bat
+_build_out.txt
+_pack_only.bat
+
+# VCS / tooling
+.git/
+.mypy_cache/
+.pytest_cache/

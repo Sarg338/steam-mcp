@@ -1,0 +1,53 @@
+[project]
+name = "steam-mcp"
+version = "0.2.0"
+description = "Read-only Steam MCP server (bring-your-own-key) for friends, games, playtime, achievements, sales, reviews, and live player counts."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Sarg" }]
+keywords = ["mcp", "steam", "model-context-protocol", "llm", "valve", "gaming"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Topic :: Games/Entertainment",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "mcp>=1.2.0",
+    "httpx>=0.27.0",
+    "pydantic>=2.6.0",
+]
+
+[project.scripts]
+steam-mcp = "steam_mcp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/Sarg338/steam-mcp"
+Repository = "https://github.com/Sarg338/steam-mcp"
+Issues = "https://github.com/Sarg338/steam-mcp/issues"
+Documentation = "https://github.com/Sarg338/steam-mcp#readme"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["steam_mcp"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/steam_mcp",
+    "/README.md",
+    "/LICENSE",
+    "/PRIVACY.md",
+    "/pyproject.toml",
+]
