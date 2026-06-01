@@ -26,5 +26,8 @@ _pack_only.bat
 .pytest_cache/
 PUBLISHING.md
 
+# Internal working notes — not for the distributed bundle
+CLAUDE.md
+
 # Tests are not needed in the runtime bundle
 tests/
