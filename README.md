@@ -137,6 +137,7 @@ Restart your client and the Steam tools appear.
 ```bash
 pip install -e ".[dev]"
 pytest -q                                     # run the test suite (no network needed)
+ruff check .                                  # lint (also enforced in CI)
 python -m py_compile steam_mcp/server.py      # syntax check
 npx @modelcontextprotocol/inspector python -m steam_mcp.server   # interactive test
 ```

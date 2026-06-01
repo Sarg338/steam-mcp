@@ -189,22 +189,29 @@ def _get_api_key() -> str:
 
 
 _CLIENT: Optional[httpx.AsyncClient] = None
+_CLIENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
 
 
 def _http_client() -> httpx.AsyncClient:
-    """Return a lazily-created, shared AsyncClient (keep-alive + pooling).
+    """Return a shared AsyncClient bound to the *current* event loop.
 
-    Reusing one client avoids a fresh TCP/TLS handshake on every request and lets
-    the fan-out tools (wishlist, DLC, comparisons) run many concurrent lookups
-    over pooled connections. An AsyncClient is safe for concurrent use.
+    Reusing one client avoids a fresh TCP/TLS handshake per request and lets the
+    fan-out tools (wishlist, DLC, comparisons) run many concurrent lookups over
+    pooled connections; an AsyncClient is safe for concurrent use. An AsyncClient
+    binds to the loop it first runs on, so if the running loop has changed (e.g. a
+    fresh asyncio.run() in a script or test) we recreate it — otherwise reuse would
+    raise "RuntimeError: Event loop is closed". The long-lived MCP server uses a
+    single loop, so in normal operation the client is created exactly once.
     """
-    global _CLIENT
-    if _CLIENT is None or _CLIENT.is_closed:
+    global _CLIENT, _CLIENT_LOOP
+    loop = asyncio.get_running_loop()
+    if _CLIENT is None or _CLIENT.is_closed or _CLIENT_LOOP is not loop:
         _CLIENT = httpx.AsyncClient(
             timeout=HTTP_TIMEOUT,
             follow_redirects=True,
             headers={"Accept": "application/json"},
         )
+        _CLIENT_LOOP = loop
     return _CLIENT
 
 
@@ -1886,7 +1893,7 @@ async def steam_get_dlc(params: DlcInput) -> str:
             infos = [None] * len(page_ids)
 
         rows = []
-        for appid, info in zip(page_ids, infos):
+        for appid, info in zip(page_ids, infos, strict=True):
             row = {"appid": appid}
             if info is not None:
                 row.update(
@@ -2459,7 +2466,7 @@ async def steam_get_wishlist(params: WishlistInput) -> str:
             infos = [None] * len(page)
 
         rows = []
-        for it, info in zip(page, infos):
+        for it, info in zip(page, infos, strict=True):
             row = {"appid": it.get("appid"), "priority": it.get("priority")}
             if info is not None:
                 row.update(

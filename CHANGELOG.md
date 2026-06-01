@@ -3,6 +3,20 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.1]
+
+### Fixed
+- The shared `httpx` client (added in 0.7.0) bound to the event loop it was first
+  used on, so invoking the tools across multiple `asyncio.run()` calls in one
+  process raised "RuntimeError: Event loop is closed". `_http_client()` is now
+  loop-aware and rebuilds the client when the running loop changes. The long-lived
+  MCP server (single event loop) was never affected; this fixes script/test usage.
+
+### Added
+- Ruff lint configuration (`[tool.ruff]`) and a GitHub Actions **CI** workflow
+  (`.github/workflows/ci.yml`) running ruff + pytest on pushes and pull requests
+  across Python 3.10–3.13.
+
 ## [0.8.0]
 
 ### Added
@@ -93,6 +107,7 @@ All notable changes to this project are documented here. Versions follow
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[0.8.1]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.8.1
 [0.8.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.8.0
 [0.7.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.7.0
 [0.6.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.6.0

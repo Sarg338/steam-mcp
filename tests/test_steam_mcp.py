@@ -133,6 +133,25 @@ def test_store_get_caches(monkeypatch):
     assert calls["n"] == 2
 
 
+def test_http_client_rebinds_across_event_loops():
+    # Regression: the shared AsyncClient binds to the loop it first runs on. A new
+    # asyncio.run() creates a new loop, so the client must be recreated — otherwise
+    # reuse raises "RuntimeError: Event loop is closed". Pre-fix this returned the
+    # same client across loops (c1 == c2).
+    S._CLIENT = None
+    S._CLIENT_LOOP = None
+
+    async def grab():
+        return id(S._http_client()), id(asyncio.get_running_loop())
+
+    c1, l1 = run(grab())
+    c2, l2 = run(grab())
+    assert l1 != l2          # genuinely different event loops
+    assert c1 != c2          # client was rebuilt for the new loop
+    S._CLIENT = None         # reset shared state for any later test
+    S._CLIENT_LOOP = None
+
+
 # --------------------------------------------------------------------------- #
 # Tool logic with mocked HTTP
 # --------------------------------------------------------------------------- #
