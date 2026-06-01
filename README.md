@@ -2,15 +2,38 @@
 
 # Steam MCP
 
-A read-only [Model Context Protocol](https://modelcontextprotocol.io) server for
-the public Steam Web API and storefront. It lets any MCP-compatible AI client
-(Claude Desktop, Claude Code, etc.) answer questions about Steam — your friends,
-games, playtime and achievements, plus account-independent things like sales,
-reviews, ratings, live player counts, and patch notes.
+[![PyPI](https://img.shields.io/pypi/v/steam-mcp)](https://pypi.org/project/steam-mcp/)
+[![Python](https://img.shields.io/pypi/pyversions/steam-mcp)](https://pypi.org/project/steam-mcp/)
+[![CI](https://github.com/Sarg338/steam-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Sarg338/steam-mcp/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![MCP Registry](https://img.shields.io/badge/MCP%20Registry-io.github.Sarg338%2Fsteam--mcp-blue)](https://registry.modelcontextprotocol.io)
 
-**Bring your own key (BYOK):** each user supplies their own free Steam Web API
-key via an environment variable. Nobody logs in, and no credentials pass through
-this server beyond the key you set yourself.
+A read-only [Model Context Protocol](https://modelcontextprotocol.io) server for the
+public Steam Web API and storefront — **34 tools, 5 prompts, and 2 resources** that let
+any MCP client (Claude Desktop, Claude Code, Cursor, …) answer questions about Steam:
+your friends, games, playtime, and achievements, plus account-independent things like
+sales, reviews, live player counts, discovery, recommendations, and co-op planning.
+
+**Read-only · official Steam APIs only · bring your own key · open source.** Nobody logs
+in; the only credential is the free Steam Web API key you set yourself, and the server
+never writes, trades, posts, launches games, or makes purchases.
+
+## Quick start
+
+Install [`uv`](https://docs.astral.sh/uv/), get a
+[free Steam Web API key](https://steamcommunity.com/dev/apikey), then:
+
+**Claude Code**
+
+```bash
+claude mcp add steam --env STEAM_API_KEY=YOUR_KEY -- uvx steam-mcp
+```
+
+**Claude Desktop** — download `steam-mcp.mcpb` from the
+[latest release](https://github.com/Sarg338/steam-mcp/releases/latest), open it
+(Settings → Extensions), and paste your key.
+
+Cursor / Cline / Windsurf and the manual `pip` setup are under [Setup](#setup) below.
 
 ---
 
@@ -121,43 +144,48 @@ copy the key. Usage is governed by the
 
 ### 2. Install
 
-```bash
-git clone https://github.com/Sarg338/steam-mcp.git
-cd steam-mcp
-pip install -e .          # or: pip install -r requirements.txt
-```
+The published package needs no checkout (Python 3.10+):
 
-Requires Python 3.10+.
+```bash
+uvx steam-mcp          # zero-install via uv (recommended)
+# or
+pip install steam-mcp  # run as: python -m steam_mcp.server
+```
 
 ### 3. Add it to your MCP client
 
-The server reads the key from the `STEAM_API_KEY` environment variable.
+The server reads your key from the `STEAM_API_KEY` environment variable.
 
-**Claude Desktop** — edit `claude_desktop_config.json`
-(`%APPDATA%\Claude\` on Windows, `~/Library/Application Support/Claude/` on macOS):
+**Claude Code**
+
+```bash
+claude mcp add steam --env STEAM_API_KEY=YOUR_KEY -- uvx steam-mcp
+```
+
+**Claude Desktop** — install `steam-mcp.mcpb` from the
+[latest release](https://github.com/Sarg338/steam-mcp/releases/latest) via
+Settings → Extensions and paste your key.
+
+**Everything else** (Claude Desktop config, Cursor, Cline, Windsurf, VS Code, …) —
+drop this block into the client's MCP config file:
 
 ```json
 {
   "mcpServers": {
     "steam": {
-      "command": "python",
-      "args": ["-m", "steam_mcp.server"],
+      "command": "uvx",
+      "args": ["steam-mcp"],
       "env": { "STEAM_API_KEY": "YOUR_KEY_HERE" }
     }
   }
 }
 ```
 
-**Claude Code** (CLI):
-
-```bash
-claude mcp add steam --env STEAM_API_KEY=YOUR_KEY_HERE -- python -m steam_mcp.server
-```
-
-If you installed with `pip install -e .`, you can use the `steam-mcp` console
-script as the command instead of `python -m steam_mcp.server`.
-
-Restart your client and the Steam tools appear.
+Config locations: Claude Desktop `claude_desktop_config.json` (`%APPDATA%\Claude\`
+on Windows, `~/Library/Application Support/Claude/` on macOS); Cursor
+`.cursor/mcp.json`; Cline `cline_mcp_settings.json`. Restart the client and the
+Steam tools appear. Running from a source checkout instead? Use
+`"command": "python", "args": ["-m", "steam_mcp.server"]`.
 
 ---
 
