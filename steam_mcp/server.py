@@ -27,7 +27,7 @@ import re
 import time
 from enum import Enum
 from typing import Any, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -52,6 +52,23 @@ MAX_RETRIES = 3
 RETRY_BASE_DELAY = 0.5
 RETRY_MAX_DELAY = 10.0
 RETRYABLE_STATUS = {429, 502, 503, 504}
+
+# Security: only these Steam hosts may be contacted (SSRF defense-in-depth — we
+# never take a URL from the user, but the request layer enforces it anyway).
+ALLOWED_HOSTS = frozenset({
+    "api.steampowered.com",
+    "store.steampowered.com",
+    "steamcommunity.com",
+})
+
+# Proactive per-host rate limiting (token bucket: sustained `rate`/sec, burst up to
+# `burst`). Bursts ≥ the fan-out cap so concurrent enrichment isn't serialized;
+# steamcommunity (market/inventory) is the strict one. Complements the 429 retry.
+RATE_LIMITS = {
+    "api.steampowered.com": (20.0, 20),
+    "store.steampowered.com": (8.0, 12),
+    "steamcommunity.com": (2.0, 5),
+}
 
 # Recent-reviews computation: Steam's query_summary is always lifetime, so the
 # recent (last-N-days) score is computed by paginating the newest reviews. These
@@ -241,6 +258,49 @@ def _http_client() -> httpx.AsyncClient:
     return _CLIENT
 
 
+def _check_host(url: str) -> None:
+    """Reject any request whose host isn't a known Steam host (SSRF guard)."""
+    host = (urlsplit(url).hostname or "").lower()
+    if host not in ALLOWED_HOSTS:
+        raise SteamApiError(f"Refusing request to non-Steam host: {host or url!r}")
+
+
+class _Bucket:
+    """Lock-free async token bucket: sustained `rate`/sec with bursts up to `burst`.
+
+    Lock-free on purpose — benign races only over/under-count by a token, which is
+    fine for rate-limiting, and it avoids binding an asyncio primitive to a loop
+    (so it's safe across multiple asyncio.run() calls).
+    """
+
+    def __init__(self, rate: float, burst: int):
+        self.rate = rate
+        self.cap = float(burst)
+        self.tokens = float(burst)
+        self.ts = time.monotonic()
+
+    async def take(self) -> None:
+        now = time.monotonic()
+        self.tokens = min(self.cap, self.tokens + (now - self.ts) * self.rate)
+        self.ts = now
+        if self.tokens < 1.0:
+            await asyncio.sleep((1.0 - self.tokens) / self.rate)
+            self.tokens = 0.0
+            self.ts = time.monotonic()
+        else:
+            self.tokens -= 1.0
+
+
+_BUCKETS = {host: _Bucket(rate, burst) for host, (rate, burst) in RATE_LIMITS.items()}
+
+
+async def _rate_limit(url: str) -> None:
+    """Wait for the per-host rate budget before a request (no-op for unlisted hosts)."""
+    bucket = _BUCKETS.get((urlsplit(url).hostname or "").lower())
+    if bucket is not None:
+        await bucket.take()
+
+
 def _retry_delay(resp, attempt: int) -> float:
     """Seconds to wait before a retry: honor Retry-After (seconds), else backoff."""
     ra = resp.headers.get("Retry-After") if resp is not None else None
@@ -259,6 +319,8 @@ async def _get_with_retry(client, url: str, params: dict, timeout: float):
     Returns a status-checked response. On the final attempt a retryable status is
     raised like any other HTTP error, so _handle_error can format it.
     """
+    _check_host(url)
+    await _rate_limit(url)
     for attempt in range(MAX_RETRIES + 1):
         final = attempt == MAX_RETRIES
         try:
@@ -352,13 +414,22 @@ async def _steam_post(path: str, data: dict[str, Any], *, with_key: bool = False
         hit = _CACHE.get(ck)
         if hit is not None:
             return hit
+    url = f"{API_BASE}/{path}"
+    _check_host(url)
+    await _rate_limit(url)
     client = _http_client()
-    resp = await client.post(f"{API_BASE}/{path}", data=body, timeout=HTTP_TIMEOUT)
+    resp = await client.post(url, data=body, timeout=HTTP_TIMEOUT)
     resp.raise_for_status()
     out = resp.json()
     if ck is not None:
         _CACHE.set(ck, out, cache_ttl)
     return out
+
+
+def _scrub(text: str) -> str:
+    """Redact a Steam Web API key (32 hex chars) from text — defense in depth so a
+    key can never leak through an error message."""
+    return re.sub(r"(?i)key=[0-9a-f]{32}", "key=***", text)
 
 
 def _handle_error(e: Exception) -> str:
@@ -387,7 +458,7 @@ def _handle_error(e: Exception) -> str:
         return f"Error: Steam API request failed with HTTP {code}."
     if isinstance(e, httpx.TimeoutException):
         return "Error: Request to Steam timed out. Please try again."
-    return f"Error: Unexpected {type(e).__name__}: {e}"
+    return _scrub(f"Error: Unexpected {type(e).__name__}: {e}")
 
 
 async def _resolve_steamid(identifier: str) -> str:
@@ -4808,6 +4879,34 @@ async def resource_app(appid: str) -> str:
 async def resource_user(steamid: str) -> str:
     """Resolve steam://user/<steamid> to the player's summary (markdown)."""
     return await steam_get_player_summary(PlayersInput(steamids=[steamid]))
+
+
+def _compact_descriptions() -> None:
+    """Trim each tool's *wire* description to its one-line summary.
+
+    FastMCP sends a tool's full docstring as its MCP description, so the model pays
+    for all of them on every request (~5k tokens across our tools). The first line
+    of each docstring is already a complete summary, so the description sent over
+    the wire is trimmed to that — the full docstrings stay in source for humans and
+    IDEs. Best-effort: if the SDK internals change, descriptions simply stay full.
+    """
+    try:
+        tools = list(mcp._tool_manager._tools.values())
+    except Exception:  # noqa: BLE001
+        return
+    for tool in tools:
+        desc = (getattr(tool, "description", None) or "").strip()
+        if not desc:
+            continue
+        summary = desc.split("\n\n", 1)[0].split("\n", 1)[0].strip()
+        if summary and len(summary) < len(desc):
+            try:
+                tool.description = summary
+            except Exception:  # noqa: BLE001
+                pass
+
+
+_compact_descriptions()
 
 
 def main() -> None:

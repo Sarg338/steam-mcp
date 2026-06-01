@@ -3,6 +3,28 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.0]
+
+Token-efficiency + security hardening. No tool changes (still 36 tools, 5 prompts,
+2 resources) — fully backward-compatible.
+
+### Changed
+- **~88% smaller tool descriptions on the wire.** FastMCP was sending each tool's
+  full docstring as its MCP description (~5,200 tokens across the toolset, every
+  request); they're now trimmed to their one-line summary (~630 tokens). The full
+  docstrings stay in the source for humans/IDEs.
+
+### Added
+- **Security hardening:**
+  - **Host allowlist** — the request layer refuses any host other than
+    `api.steampowered.com` / `store.steampowered.com` / `steamcommunity.com`
+    (SSRF defense-in-depth).
+  - **Per-host rate limiting** — token-bucket limiters (burst-friendly, so fan-out
+    isn't serialized) on top of the existing 429 retry/backoff.
+  - **API-key scrubbing** — keys are redacted from any error output.
+- `SECURITY.md` documenting the full posture, and `SKILL.md` (an agent skill that
+  teaches token-efficient, correct use of the toolset).
+
 ## [1.3.0]
 
 ### Added
@@ -211,6 +233,7 @@ changes will require a 2.0.
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[1.4.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.4.0
 [1.3.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.3.0
 [1.2.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.1.0

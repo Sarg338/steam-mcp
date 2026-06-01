@@ -491,7 +491,7 @@ def test_get_with_retry_succeeds_after_429(monkeypatch):
 
     monkeypatch.setattr(S, "_http_client", lambda: FakeClient())
     monkeypatch.setattr(S.asyncio, "sleep", no_sleep)
-    data = run(S._raw_get("https://x", {}))
+    data = run(S._raw_get("https://api.steampowered.com/x", {}))
     assert data == {"ok": True}
     assert calls["n"] == 2          # one 429 -> retried once, then 200
 
@@ -510,7 +510,7 @@ def test_get_with_retry_gives_up(monkeypatch):
     monkeypatch.setattr(S, "_http_client", lambda: FakeClient())
     monkeypatch.setattr(S.asyncio, "sleep", no_sleep)
     with pytest.raises(RuntimeError):
-        run(S._raw_get("https://x", {}))
+        run(S._raw_get("https://api.steampowered.com/x", {}))
     assert calls["n"] == S.MAX_RETRIES + 1   # initial try + MAX_RETRIES
 
 
@@ -687,6 +687,59 @@ def test_market_price_unavailable(monkeypatch):
     out = run(S.steam_get_market_price(S.MarketPriceInput(
         appid=730, market_hash_name="Nonexistent Item")))
     assert "no current" in out.lower()
+
+
+# --------------------------------------------------------------------------- #
+# 1.4.0: token efficiency + security hardening
+# --------------------------------------------------------------------------- #
+
+def test_descriptions_compact():
+    # The model pays for tool descriptions every request; they must be one-line
+    # summaries, not the full multi-paragraph docstrings.
+    tools = run(S.mcp.list_tools())
+    for t in tools:
+        assert "\n\n" not in (t.description or ""), t.name
+    total = sum(len(t.description or "") for t in tools)
+    assert total < 6000        # full docstrings were ~20k chars
+
+
+def test_check_host_allowlist():
+    for ok in ("https://api.steampowered.com/x",
+               "https://store.steampowered.com/api/y",
+               "https://steamcommunity.com/inventory/1/753/6"):
+        S._check_host(ok)      # no raise
+    for bad in ("https://evil.example.com/x",
+                "https://api.steampowered.com.evil.com/x",
+                "http://169.254.169.254/latest/meta-data"):
+        with pytest.raises(S.SteamApiError):
+            S._check_host(bad)
+
+
+def test_scrub_api_key():
+    key = "0123456789abcdef0123456789ABCDEF"
+    out = S._scrub(f"GET https://api.steampowered.com/x?key={key}&appid=1 failed")
+    assert key not in out and "key=***" in out
+
+
+def test_rate_limiter_bucket(monkeypatch):
+    slept = []
+
+    async def fake_sleep(s):
+        slept.append(s)
+
+    monkeypatch.setattr(S.asyncio, "sleep", fake_sleep)
+
+    async def go():
+        b = S._Bucket(rate=10.0, burst=2)
+        await b.take()
+        await b.take()              # within burst -> no wait
+        burst_sleeps = len(slept)
+        await b.take()              # over budget -> must wait
+        return burst_sleeps, len(slept)
+
+    burst_sleeps, after = run(go())
+    assert burst_sleeps == 0
+    assert after == 1
 
 
 # --------------------------------------------------------------------------- #

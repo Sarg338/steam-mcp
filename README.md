@@ -110,8 +110,10 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_get_app_news` | Recent news / patch notes | no |
 
 Every tool supports `response_format: "markdown"` (default, human-readable) or
-`"json"` (structured), and all are annotated `readOnlyHint: true`. Tools that read
-localized text (`steam_get_app_details`, `steam_search_apps`, `steam_get_app_reviews`,
+`"json"` (structured), and all are annotated `readOnlyHint: true`. Markdown is the
+compact default — ask for `json` only when you need to parse fields, and prefer the
+composite tools (`steam_should_i_buy`, `steam_recommend`, `steam_discover`,
+`steam_plan_coop_night`) over chaining several calls. Tools that read localized text (`steam_get_app_details`, `steam_search_apps`, `steam_get_app_reviews`,
 `steam_get_player_achievements`, …) accept a `language` parameter — a Steam language
 name like `english`, `french`, `german`, or `schinese` (default `english`).
 
@@ -194,6 +196,23 @@ on Windows, `~/Library/Application Support/Claude/` on macOS); Cursor
 `.cursor/mcp.json`; Cline `cline_mcp_settings.json`. Restart the client and the
 Steam tools appear. Running from a source checkout instead? Use
 `"command": "python", "args": ["-m", "steam_mcp.server"]`.
+
+---
+
+## Security
+
+Read-only, official-Steam-only, and bring-your-own-key. In short:
+
+- **Read-only** — never writes, trades, posts, launches games, or buys anything.
+- **Your key stays yours** — read from `STEAM_API_KEY`; never written to disk,
+  logged, cached, or put in output (and redacted from error messages).
+- **Official hosts only** — the request layer refuses any host that isn't
+  `api.steampowered.com` / `store.steampowered.com` / `steamcommunity.com` (SSRF
+  guard), with per-host rate limiting and retry/backoff.
+- **Typed, validated inputs** (`extra="forbid"`); no data kept between requests
+  beyond a small TTL cache of non-user store data.
+
+Full details and how to report issues are in [SECURITY.md](SECURITY.md).
 
 ---
 
