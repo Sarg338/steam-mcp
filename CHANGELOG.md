@@ -3,6 +3,16 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.6.1]
+
+### Changed
+- **The Abandoned list header now always shows `(N total, showing M)`, matching the
+  Backlog header.** Since 1.5.0 the abandoned count only appeared when the list was
+  truncated, and in a slightly different format; now both lists use the identical
+  `{title} — {description} (N total, showing M)` shape unconditionally, so a caller
+  can always see how many abandoned games exist and whether the list is truncated.
+  Markdown display only — no schema, field, or parameter changes.
+
 ## [1.6.0]
 
 ### Added
@@ -294,6 +304,7 @@ changes will require a 2.0.
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[1.6.1]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.6.1
 [1.6.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.6.0
 [1.5.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.5.0
 [1.4.3]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.4.3

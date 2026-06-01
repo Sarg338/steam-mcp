@@ -838,6 +838,11 @@ def test_analyze_library_abandoned_decoupled(monkeypatch):
         steamid="76561197960287930", abandoned_limit=2)))
     assert "5 total, showing 2" in md
 
+    # Count appears even when NOT truncated — parity with the Backlog header.
+    md_full = run(S.steam_analyze_library(S.LibraryAnalysisInput(
+        steamid="76561197960287930")))
+    assert "5 total, showing 5" in md_full
+
     j = json.loads(run(S.steam_analyze_library(S.LibraryAnalysisInput(
         steamid="76561197960287930", abandoned_limit=2, response_format="json"))))
     assert j["abandoned_truncated"] is True

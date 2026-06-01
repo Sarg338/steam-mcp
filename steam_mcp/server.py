@@ -3724,10 +3724,11 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
             lp = f", last played {g['last_played']}" if g["last_played"] else ""
             lines.append(f"- **{g['name']}** — {g['hours']}h{lp}")
         if abandoned:
-            head = f"## Abandoned (played, untouched {params.stale_days}+ days)"
-            if abandoned_truncated:
-                head += f" — {len(abandoned_src)} total, showing {len(abandoned)}"
-            lines += ["", head]
+            lines += [
+                "",
+                f"## Abandoned — played, untouched {params.stale_days}+ days "
+                f"({len(abandoned_src)} total, showing {len(abandoned)})",
+            ]
             for g in abandoned:
                 lines.append(
                     f"- **{g['name']}** — {g['hours']}h, last played {g['last_played']}"
