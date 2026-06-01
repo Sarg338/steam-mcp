@@ -24,3 +24,4 @@ _pack_only.bat
 .git/
 .mypy_cache/
 .pytest_cache/
+PUBLISHING.md

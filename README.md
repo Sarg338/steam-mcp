@@ -21,10 +21,11 @@ Account / profile (needs a public profile):
 - "What's my most-played game, and how many hours?"
 - "Which achievements am I still missing in Hollow Knight?"
 - "What's my Steam level?" / "Does this account have any VAC bans?"
+- "What's on my wishlist, and is any of it on sale right now?"
 
 Account-independent (works for any game, no SteamID needed):
 - "Is *Baldur's Gate 3* any good? What's its review score?"
-- "What's on sale on Steam right now?"
+- "What's on sale on Steam right now?" / "What are the current top sellers and new releases?"
 - "How many people are playing *Counter-Strike 2* this minute?"
 - "What was in the latest *Dota 2* update?"
 - "How much does *Hades II* cost and what genres is it?"
@@ -49,6 +50,8 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_get_app_details` | Description, price, genres, release date, Metacritic | no |
 | `steam_get_app_reviews` | Lifetime verdict, +/- counts, sample reviews; optional **recent (last-N-days) score** via `review_filter='recent'` | no |
 | `steam_get_featured_specials` | Games currently on sale (regional) | no |
+| `steam_get_store_highlights` | **Top sellers, new releases, or coming soon** | no |
+| `steam_get_wishlist` | **A user's wishlist, with live prices + what's on sale** | yes |
 | `steam_get_current_players` | Live concurrent player count | no |
 | `steam_get_app_news` | Recent news / patch notes | no |
 
