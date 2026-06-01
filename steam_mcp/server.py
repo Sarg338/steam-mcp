@@ -3610,9 +3610,9 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
     """Analyze a whole game library: backlog, playtime distribution, abandoned games.
 
     Answers "what should I play", "what have I never touched", "where do my hours
-    go", and "what did I love but abandon". Computed from a single owned-games
-    call, so it spans the entire library cheaply. Requires the profile's Game
-    Details to be Public. Needs an API key.
+    go", and "what did I love but abandon". Computed from one owned-games call
+    (plus a small persona lookup for the header), so it spans the entire library
+    cheaply. Requires the profile's Game Details to be Public. Needs an API key.
 
     Reports total games and hours; the never-played backlog; a playtime histogram
     (0h / <1h / 1-5h / 5-20h / 20-100h / 100h+); most-played games; recently active
@@ -3654,6 +3654,12 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
                 "No games returned. The profile's Game Details are likely private, "
                 "or it owns no games."
             )
+        # Best-effort persona (display) name for the header — the resolver only
+        # yields a SteamID64, so this is a separate, cheap lookup; failure is fine.
+        try:
+            persona = (await _summaries_for([sid])).get(sid, {}).get("personaname")
+        except Exception:  # noqa: BLE001
+            persona = None
         if params.exclude_temp_clients:
             temp_clients = [
                 g for g in all_games if _is_temp_client(g.get("name", ""))
@@ -3759,6 +3765,7 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
         if params.response_format == ResponseFormat.JSON:
             return _dump({
                 "steamid": sid,
+                "persona_name": persona,
                 "summary": summary,
                 "playtime_buckets": buckets,
                 "top_played": top_played,
@@ -3772,8 +3779,9 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
                 ],
             })
 
+        who = f"{persona} ({sid})" if persona else sid
         lines = [
-            f"# Library analysis for {sid}",
+            f"# Library analysis for {who}",
             f"- **Games owned**: {game_count}  |  **Total played**: "
             f"{total_hours:,.1f}h",
             f"- **Never played**: {len(never)} "
@@ -3798,8 +3806,8 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
                 f"{len(never)} never-played (alphabetical); {more}."
             )
         lines += [
-            f"- **Avg hours/game**: {summary['avg_hours_per_owned_game']} owned, "
-            f"{summary['avg_hours_per_played_game']} of played",
+            f"- **Avg hours/game**: {summary['avg_hours_per_owned_game']} across "
+            f"all owned, {summary['avg_hours_per_played_game']} across played games",
             "",
             "## Playtime distribution",
             f"- never: {buckets['0h']} · <1h: {buckets['under_1h']} · "

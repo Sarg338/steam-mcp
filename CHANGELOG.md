@@ -3,6 +3,17 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.2]
+
+### Changed
+- **`steam_analyze_library` header now shows the persona name**, e.g. `Library
+  analysis for Sarg338 (7656…)` instead of a bare SteamID64. The display name comes
+  from a small best-effort `GetPlayerSummaries` lookup (the identifier resolver only
+  yields a SteamID64); if it's unavailable the header falls back to the SteamID, and
+  a lookup failure never breaks the analysis. JSON gains a `persona_name` field.
+- **Clearer average wording**: `Avg hours/game: 27.9 across all owned, 35.7 across
+  played games` (was the awkward "27.9 owned, 35.7 of played"). Same math.
+
 ## [1.7.1]
 
 ### Fixed
@@ -337,6 +348,7 @@ changes will require a 2.0.
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[1.7.2]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.2
 [1.7.1]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.1
 [1.7.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.0
 [1.6.1]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.6.1

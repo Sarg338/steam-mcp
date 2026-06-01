@@ -1005,6 +1005,47 @@ def test_analyze_library_tiny_playtime_render(monkeypatch):
     assert "0.0h, last played 2013-09-18" not in md
 
 
+def test_analyze_library_persona_header(monkeypatch):
+    sid = "76561197960287930"
+    games = [{"appid": 1, "name": "Game A", "playtime_forever": 600,
+              "rtime_last_played": 1700000000}]
+    payload = {"response": {"game_count": 1, "games": games}}
+
+    async def fake_steam(path, params, **k):
+        return payload
+
+    async def persona_ok(ids):
+        return {sid: {"personaname": "Sarg338"}}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(S, "_summaries_for", persona_ok)
+
+    # ISSUE-8: header shows persona (sid), not a bare SteamID64.
+    md = run(S.steam_analyze_library(S.LibraryAnalysisInput(steamid=sid)))
+    assert md.split("\n")[0] == f"# Library analysis for Sarg338 ({sid})"
+    # ISSUE-7: clearer average wording.
+    assert "across all owned" in md and "across played games" in md
+    assert "of played" not in md
+
+    d = json.loads(run(S.steam_analyze_library(S.LibraryAnalysisInput(
+        steamid=sid, response_format="json"))))
+    assert d["persona_name"] == "Sarg338" and d["steamid"] == sid
+
+    # Persona unavailable -> fall back to the bare SteamID (no parens).
+    async def persona_empty(ids):
+        return {}
+    monkeypatch.setattr(S, "_summaries_for", persona_empty)
+    md2 = run(S.steam_analyze_library(S.LibraryAnalysisInput(steamid=sid)))
+    assert md2.split("\n")[0] == f"# Library analysis for {sid}"
+
+    # Persona lookup failure must not break the analysis (best-effort).
+    async def persona_boom(ids):
+        raise RuntimeError("network")
+    monkeypatch.setattr(S, "_summaries_for", persona_boom)
+    md3 = run(S.steam_analyze_library(S.LibraryAnalysisInput(steamid=sid)))
+    assert md3.split("\n")[0] == f"# Library analysis for {sid}"
+
+
 def test_app_details_features(monkeypatch):
     data = {"123": {"success": True, "data": {
         "name": "Game", "type": "game", "is_free": False,
