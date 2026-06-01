@@ -31,6 +31,17 @@ Requests may include:
 - It does **not** write your API key to any file it ships. The key stays in your
   local configuration.
 
+## Storage, sharing, and retention
+
+- **Storage:** none. The server persists nothing to disk. A small in-memory cache
+  holds only *non-user*, static responses (store/app/tag/news data) and lives only
+  for the running process.
+- **Third-party sharing:** none. Data is exchanged only between your machine and
+  Valve's official endpoints; it is never sent to the author or any analytics or
+  third-party service.
+- **Retention:** none. Nothing is retained between requests beyond the short-lived
+  in-memory cache above, which is discarded when the process exits.
+
 ## Data visibility
 
 The server can only read data that Valve exposes. Friends lists, owned games, and

@@ -3,6 +3,13 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.1]
+
+### Added
+- A bundle **icon** (`icon.png`, referenced from `manifest.json`) and an expanded
+  `PRIVACY.md` (explicit storage / third-party-sharing / retention sections) — to
+  meet the Anthropic Connectors Directory submission requirements. No code changes.
+
 ## [1.4.0]
 
 Token-efficiency + security hardening. No tool changes (still 36 tools, 5 prompts,
@@ -233,6 +240,7 @@ changes will require a 2.0.
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[1.4.1]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.4.1
 [1.4.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.4.0
 [1.3.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.3.0
 [1.2.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.2.0
