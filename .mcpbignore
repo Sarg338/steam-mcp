@@ -12,6 +12,9 @@ dist/
 .venv/
 venv/
 
+# OS / shell crash cruft
+*.stackdump
+
 # Packaging outputs / dev helpers (explicit names; avoid glob patterns like
 # _*.py that would also match __init__.py)
 *.mcpb
