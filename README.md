@@ -18,9 +18,11 @@ this server beyond the key you set yourself.
 
 Account / profile (needs a public profile):
 - "Who's on my Steam friends list, and who's online right now?"
+- "Which of my friends own *Helldivers 2* — and who's playing it right now?"
 - "What's my most-played game, and how many hours?"
 - "Which achievements am I still missing in Hollow Knight?"
 - "What are my career stats in *Team Fortress 2*?"
+- "What are my rarest achievements in *Hollow Knight*?"
 - "What's my Steam level?" / "Does this account have any VAC bans?"
 - "What's on my wishlist, and is any of it on sale right now?"
 - "Analyze my library — what's my backlog and what have I abandoned?"
@@ -32,6 +34,7 @@ Account-independent (works for any game, no SteamID needed):
 - "What was in the latest *Dota 2* update?"
 - "How much does *Hades II* cost and what genres is it?"
 - "What DLC does *Cities: Skylines* have, and is any of it on sale?"
+- "Is *Elden Ring* a soulslike? What are its community tags?"
 
 ---
 
@@ -42,6 +45,7 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_resolve_vanity_url` | Vanity name / profile URL → SteamID64 | yes |
 | `steam_get_player_summary` | Status (Online/Away/In-Game…), current game, for 1–100 users | yes |
 | `steam_get_friend_list` | Friends enriched with name + live status | yes |
+| `steam_find_friends_who_own` | **Which friends own (or are playing) a game** — "who can I play X with" | yes |
 | `steam_get_owned_games` | Owned games with total/recent hours (sortable) | yes |
 | `steam_analyze_library` | **Backlog, playtime distribution, abandoned games** across a whole library | yes |
 | `steam_get_recently_played_games` | Last-2-weeks playtime | yes |
@@ -51,9 +55,11 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_get_game_schema` | A game's full achievement/stat definitions | yes |
 | `steam_get_global_achievement_percentages` | Achievement rarity (global %) | no |
 | `steam_get_user_game_stats` | **A user's in-game stats** (kills, wins, distance…) for a game | yes |
+| `steam_get_rarest_unlocks` | **A player's rarest achievement unlocks** in a game (by global rarity) | yes |
 | `steam_search_apps` | Game title → appid (+ price) | no |
 | `steam_get_app_details` | **Full store details** — play modes/co-op, controller, DLC, languages, requirements, Metacritic | no |
 | `steam_get_dlc` | **A game's DLC**, with live prices and what's on sale | no |
+| `steam_get_app_tags` | **A game's top community tags** (Souls-like, Roguelike, Cozy…) | no |
 | `steam_get_app_reviews` | Lifetime verdict, +/- counts, sample reviews; optional **recent (last-N-days) score** via `review_filter='recent'` | no |
 | `steam_get_featured_specials` | Games currently on sale (regional) | no |
 | `steam_get_store_highlights` | **Top sellers, new releases, or coming soon** | no |

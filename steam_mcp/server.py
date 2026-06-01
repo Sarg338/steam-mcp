@@ -93,6 +93,8 @@ CACHE_TTL_PACKAGE = 3600
 CACHE_TTL_FEATURED = 300        # 5 min
 CACHE_TTL_SCHEMA = 86400        # achievement/stat definitions are static
 CACHE_TTL_GLOBAL_ACH = 3600
+CACHE_TTL_TAGS = 3600           # community tag weights (slow-changing)
+CACHE_TTL_TAGMAP = 86400        # tagid -> name dictionary is effectively static
 
 
 class _TTLCache:
@@ -891,6 +893,165 @@ async def steam_get_friend_list(params: FriendListInput) -> str:
         return _handle_error(e)
 
 
+class FriendsWhoOwnInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    steamid: str = Field(
+        ...,
+        description="The user whose friends to check: SteamID64, vanity, or URL.",
+        min_length=1, max_length=200,
+    )
+    appid: int = Field(
+        ..., description="The game (appid) to check friends' ownership of.", ge=1
+    )
+    max_friends: int = Field(
+        default=50,
+        description="How many friends to check for ownership (1-250). Each is one "
+        "concurrent owned-games lookup; raise for completeness, lower for speed.",
+        ge=1, le=250,
+    )
+    playing_now: bool = Field(
+        default=False,
+        description="If true, list only friends currently in-game in this title now.",
+    )
+    limit: int = Field(
+        default=30, description="Max owners to list (1-100).", ge=1, le=100
+    )
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+async def _friend_owns_app(fid: str, appid: int) -> dict:
+    """Check whether one user owns `appid` via their owned-games list.
+
+    Returns {fid, owns, private, playtime_min}. A private/hidden game list yields
+    private=True (we can't tell), distinct from owns=False (public, doesn't own).
+    """
+    try:
+        d = await _steam_get(
+            "IPlayerService/GetOwnedGames/v1/",
+            {"steamid": fid, "include_appinfo": 0, "include_played_free_games": 1},
+        )
+        resp = d.get("response", {})
+        if not resp:  # empty {} -> game details private/hidden
+            return {"fid": fid, "owns": False, "private": True, "playtime_min": 0}
+        g = next((x for x in resp.get("games", []) if x.get("appid") == appid), None)
+        if g is None:
+            return {"fid": fid, "owns": False, "private": False, "playtime_min": 0}
+        return {
+            "fid": fid, "owns": True, "private": False,
+            "playtime_min": g.get("playtime_forever", 0),
+        }
+    except Exception:  # noqa: BLE001
+        return {"fid": fid, "owns": False, "private": True, "playtime_min": 0}
+
+
+@mcp.tool(
+    name="steam_find_friends_who_own",
+    annotations={
+        "title": "Find Friends Who Own a Game",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def steam_find_friends_who_own(params: FriendsWhoOwnInput) -> str:
+    """Find which of a user's friends own (or are right now playing) a given game.
+
+    Answers "who can I play X with". Cross-references the user's friend list with each
+    friend's owned games, then annotates owners with their playtime and whether they
+    are in the game right now (use playing_now=true to filter to just those).
+    Requires the USER's friend list to be Public AND each FRIEND's game details to be
+    Public — friends with private libraries can't be determined and are reported
+    separately. Checks up to max_friends friends concurrently. Needs an API key.
+
+    Args:
+        params (FriendsWhoOwnInput): steamid, appid, max_friends, playing_now, limit.
+
+    Returns:
+        str: Markdown or JSON. game name, counts (total_friends, checked, owners,
+        private_or_unknown), and the owners (name, playtime_hours, status,
+        playing_now), sorted by playtime.
+    """
+    try:
+        sid = await _resolve_steamid(params.steamid)
+        fdata = await _steam_get(
+            "ISteamUser/GetFriendList/v1/",
+            {"steamid": sid, "relationship": "friend"},
+        )
+        friends = fdata.get("friendslist", {}).get("friends", [])
+        if not friends:
+            return (
+                "No friends returned. The user's friend list is likely private "
+                "(set Friends List to Public in Steam privacy settings)."
+            )
+        all_ids = [f["steamid"] for f in friends]
+        check_ids = all_ids[: params.max_friends]
+        results = await _gather_limited(
+            [_friend_owns_app(fid, params.appid) for fid in check_ids]
+        )
+        owners = [r for r in results if r["owns"]]
+        private = sum(1 for r in results if r["private"])
+
+        owner_ids = [r["fid"] for r in owners]
+        summaries = await _summaries_for(owner_ids) if owner_ids else {}
+        info = await _app_price(params.appid, "us")
+        game_name = info.get("name") or f"app {params.appid}"
+
+        rows = []
+        for r in owners:
+            p = summaries.get(r["fid"], {})
+            playing = bool(p.get("gameid")) and str(p.get("gameid")) == str(params.appid)
+            rows.append(
+                {
+                    "steamid": r["fid"],
+                    "name": p.get("personaname", "Unknown"),
+                    "playtime_hours": _minutes_to_hours(r["playtime_min"]),
+                    "status": _persona_label(p) if p else "Unknown",
+                    "playing_now": playing,
+                }
+            )
+        owners_count = len(rows)
+        if params.playing_now:
+            rows = [r for r in rows if r["playing_now"]]
+        rows.sort(key=lambda r: r["playtime_hours"], reverse=True)
+        page = rows[: params.limit]
+
+        if params.response_format == ResponseFormat.JSON:
+            return _dump(
+                {
+                    "steamid": sid,
+                    "appid": params.appid,
+                    "game": game_name,
+                    "total_friends": len(all_ids),
+                    "checked": len(check_ids),
+                    "owners": owners_count,
+                    "private_or_unknown": private,
+                    "friends": page,
+                }
+            )
+
+        checked_note = (
+            f" (checked first {len(check_ids)})" if len(check_ids) < len(all_ids) else ""
+        )
+        lines = [
+            f"# Friends who own {game_name} (appid {params.appid})",
+            f"{owners_count} of {len(all_ids)} friends own it{checked_note}; "
+            f"{private} had private game libraries.",
+        ]
+        if params.playing_now:
+            lines.append(f"Showing only those playing right now ({len(page)}).")
+        lines.append("")
+        for r in page:
+            tail = " — ▶️ playing now" if r["playing_now"] else ""
+            lines.append(f"- **{r['name']}** — {r['playtime_hours']}h{tail}")
+        if not page:
+            lines.append("(none)")
+        return "\n".join(lines)
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
+
+
 # ---------------------------------------------------------------------------
 # Tools: games & playtime
 # ---------------------------------------------------------------------------
@@ -1305,6 +1466,108 @@ async def steam_get_user_game_stats(params: PlayerGameInput) -> str:
         return _handle_error(e)
 
 
+class RarestUnlocksInput(PlayerGameInput):
+    limit: int = Field(
+        default=10,
+        description="How many of the rarest unlocked achievements to list (1-50).",
+        ge=1, le=50,
+    )
+
+
+@mcp.tool(
+    name="steam_get_rarest_unlocks",
+    annotations={
+        "title": "Get Player's Rarest Achievement Unlocks",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def steam_get_rarest_unlocks(params: RarestUnlocksInput) -> str:
+    """Show a player's RAREST unlocked achievements in a game (by global unlock %).
+
+    Joins the player's unlocked achievements with each one's global unlock rarity to
+    surface their most impressive "flexes" — achievements few players ever earn. Does
+    in one step what pairing steam_get_player_achievements with
+    steam_get_global_achievement_percentages would. Requires the profile's game
+    details to be PUBLIC and the game to have achievements. Needs an API key.
+
+    Args:
+        params (RarestUnlocksInput): steamid, appid, limit.
+
+    Returns:
+        str: Markdown or JSON. game name, total unlocked count, and the rarest
+        unlocked achievements (name, global_pct, unlocked_at), rarest first.
+    """
+    try:
+        sid = await _resolve_steamid(params.steamid)
+        ach_data, glob_data = await asyncio.gather(
+            _steam_get(
+                "ISteamUserStats/GetPlayerAchievements/v1/",
+                {"steamid": sid, "appid": params.appid, "l": "english"},
+            ),
+            _steam_get(
+                "ISteamUserStats/GetGlobalAchievementPercentagesForApp/v2/",
+                {"gameid": params.appid},
+                with_key=False,
+                cache_ttl=CACHE_TTL_GLOBAL_ACH,
+            ),
+        )
+        stats = ach_data.get("playerstats", {})
+        if not stats.get("success", False):
+            return (
+                f"Error: {stats.get('error', 'No achievement data')}. The profile "
+                f"may be private, or app {params.appid} has no achievements."
+            )
+        unlocked = [a for a in stats.get("achievements", []) if a.get("achieved") == 1]
+        if not unlocked:
+            return f"{sid} has no unlocked achievements in app {params.appid}."
+        pct_map = {
+            g.get("name"): g.get("percent", 0.0)
+            for g in glob_data.get("achievementpercentages", {}).get("achievements", [])
+        }
+        rows = []
+        for a in unlocked:
+            api = a.get("apiname")
+            pct = round(pct_map[api], 2) if api in pct_map else None
+            rows.append(
+                {
+                    "name": a.get("name") or api,
+                    "api_name": api,
+                    "global_pct": pct,
+                    "unlocked_at": _ts_to_date(a.get("unlocktime")),
+                }
+            )
+        rows.sort(key=lambda r: (r["global_pct"] is None, r["global_pct"] or 0.0))
+        game_name = stats.get("gameName", str(params.appid))
+        page = rows[: params.limit]
+
+        if params.response_format == ResponseFormat.JSON:
+            return _dump(
+                {
+                    "steamid": sid,
+                    "appid": params.appid,
+                    "game": game_name,
+                    "unlocked_count": len(unlocked),
+                    "rarest": page,
+                }
+            )
+
+        lines = [
+            f"# Rarest unlocks: {game_name} (appid {params.appid})",
+            f"{sid} has unlocked {len(unlocked)} achievements — rarest first:",
+            "",
+        ]
+        for r in page:
+            pct = f"{r['global_pct']}%" if r["global_pct"] is not None else "rarity n/a"
+            when = f" (unlocked {r['unlocked_at']})" if r["unlocked_at"] else ""
+            lines.append(f"- **{r['name']}** — {pct} of players{when}")
+        return "\n".join(lines)
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
+
+
 # ---------------------------------------------------------------------------
 # Tools: store (no API key required)
 # ---------------------------------------------------------------------------
@@ -1667,6 +1930,120 @@ async def steam_get_dlc(params: DlcInput) -> str:
             else:
                 lines.append(f"- appid {r['appid']}")
         return "\n".join(lines)
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
+
+
+class AppTagsInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    appid: int = Field(..., description="Steam application (game) ID.", ge=1)
+    limit: int = Field(
+        default=20,
+        description="Max tags to return, ordered by community weight (1-50).",
+        ge=1, le=50,
+    )
+    country_code: str = Field(default="us", min_length=2, max_length=2)
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+async def _tag_name_map() -> dict:
+    """Map Steam community tagid -> display name (cached; static-ish, no key).
+
+    GetItems returns only tagids + weights; this storefront dictionary supplies the
+    human names (e.g. 29482 -> 'Souls-like').
+    """
+    data = await _raw_get(
+        "https://store.steampowered.com/tagdata/populartags/english",
+        {}, cache_ttl=CACHE_TTL_TAGMAP,
+    )
+    out: dict = {}
+    if isinstance(data, list):
+        for t in data:
+            try:
+                out[int(t.get("tagid"))] = t.get("name")
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+@mcp.tool(
+    name="steam_get_app_tags",
+    annotations={
+        "title": "Get Steam Community Tags",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def steam_get_app_tags(params: AppTagsInput) -> str:
+    """Get a game's top community tags (Souls-like, Roguelike, Cozy, …) by weight.
+
+    Community tags are player-applied descriptors that capture sub-genres and vibes
+    Steam's official `genres` miss — the best signal for "is this a soulslike / cozy
+    / bullet-hell". Returns the most-weighted tags for the app. Built from the
+    storefront's modern item API plus its public tag dictionary; no API key required.
+
+    Args:
+        params (AppTagsInput): appid, limit, country_code.
+
+    Returns:
+        str: Markdown (comma-separated tag list) or JSON (per tag: tag, tagid,
+        weight), ordered most-weighted first.
+    """
+    try:
+        body = {
+            "ids": [{"appid": params.appid}],
+            "context": {
+                "language": "english",
+                "country_code": params.country_code.upper(),
+                "steam_realm": 1,
+            },
+            "data_request": {"include_tag_count": 50, "include_basic_info": True},
+        }
+        data = await _steam_get(
+            "IStoreBrowseService/GetItems/v1/",
+            {"input_json": json.dumps(body, separators=(",", ":"))},
+            with_key=False,
+            cache_ttl=CACHE_TTL_TAGS,
+        )
+        items = (data.get("response") or {}).get("store_items") or []
+        if not items:
+            return f"No store data found for app {params.appid}."
+        item = items[0]
+        name = item.get("name") or str(params.appid)
+        raw_tags = item.get("tags") or []
+        if not raw_tags:
+            return f"No community tags found for {name} (appid {params.appid})."
+        name_map = await _tag_name_map()
+        rows = []
+        for t in raw_tags:
+            try:
+                tid = int(t.get("tagid"))
+            except (TypeError, ValueError):
+                continue
+            tname = name_map.get(tid)
+            if not tname:
+                continue
+            rows.append({"tag": tname, "tagid": tid, "weight": t.get("weight", 0)})
+        rows = rows[: params.limit]
+        if not rows:
+            return (
+                f"Found {len(raw_tags)} tags for {name} but could not resolve their "
+                f"names from the tag dictionary."
+            )
+        if params.response_format == ResponseFormat.JSON:
+            return _dump(
+                {"appid": params.appid, "name": name, "count": len(rows), "tags": rows}
+            )
+        return "\n".join(
+            [
+                f"# Community tags: {name} (appid {params.appid})",
+                "",
+                ", ".join(r["tag"] for r in rows),
+            ]
+        )
     except Exception as e:  # noqa: BLE001
         return _handle_error(e)
 

@@ -3,6 +3,19 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.0]
+
+### Added
+- `steam_find_friends_who_own` — which of a user's friends own (or are right now
+  playing) a given game, with each owner's playtime and live status. Answers
+  "who can I play X with". Checks friends concurrently; friends with private
+  libraries are reported separately rather than guessed.
+- `steam_get_rarest_unlocks` — a player's rarest unlocked achievements in a game,
+  joining their unlocks with global unlock rarity to surface their best "flexes".
+- `steam_get_app_tags` — a game's top community tags (Souls-like, Roguelike,
+  Cozy, …) by player weight — the sub-genre/vibe signal Steam's official genres
+  miss. Built from the storefront item API plus its public tag dictionary; no key.
+
 ## [0.7.0]
 
 ### Added
@@ -80,6 +93,7 @@ All notable changes to this project are documented here. Versions follow
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[0.8.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.8.0
 [0.7.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.7.0
 [0.6.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.6.0
 [0.5.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.5.0

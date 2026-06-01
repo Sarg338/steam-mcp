@@ -404,7 +404,91 @@ def test_tools_registered():
     assert "steam_get_app_reviews" in by_name
     assert "steam_get_dlc" in by_name
     assert "steam_get_user_game_stats" in by_name
+    assert "steam_get_app_tags" in by_name
+    assert "steam_get_rarest_unlocks" in by_name
+    assert "steam_find_friends_who_own" in by_name
     # the reviews tool takes the reviews input (has appid + review_filter),
     # not _fmt_review's raw-dict signature
     schema = json.dumps(by_name["steam_get_app_reviews"].inputSchema)
     assert "appid" in schema and "review_filter" in schema
+
+
+# --------------------------------------------------------------------------- #
+# 0.8.0: community tags, rarest unlocks, friends-who-own
+# --------------------------------------------------------------------------- #
+
+def test_get_app_tags(monkeypatch):
+    async def fake_steam(path, params, **k):
+        return {"response": {"store_items": [{
+            "appid": 1, "success": 1, "name": "Game",
+            "tags": [{"tagid": 10, "weight": 100}, {"tagid": 20, "weight": 50},
+                     {"tagid": 99, "weight": 10}]}]}}
+
+    async def fake_raw(url, params, cache_ttl=0):
+        return [{"tagid": 10, "name": "Roguelike"}, {"tagid": 20, "name": "Co-op"}]
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    out = run(S.steam_get_app_tags(S.AppTagsInput(appid=1, response_format="json")))
+    d = json.loads(out)
+    assert d["name"] == "Game"
+    assert d["count"] == 2                          # tagid 99 has no name -> skipped
+    assert d["tags"][0] == {"tag": "Roguelike", "tagid": 10, "weight": 100}
+    md = run(S.steam_get_app_tags(S.AppTagsInput(appid=1)))
+    assert "Roguelike" in md and "Co-op" in md
+
+
+def test_rarest_unlocks(monkeypatch):
+    async def fake_steam(path, params, **k):
+        if "GetPlayerAchievements" in path:
+            return {"playerstats": {"success": True, "gameName": "G", "achievements": [
+                {"apiname": "A", "name": "Ach A", "achieved": 1, "unlocktime": 1700000000},
+                {"apiname": "B", "name": "Ach B", "achieved": 1, "unlocktime": 1700000000},
+                {"apiname": "C", "name": "Ach C", "achieved": 0}]}}
+        return {"achievementpercentages": {"achievements": [
+            {"name": "A", "percent": 5.0}, {"name": "B", "percent": 80.0}]}}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    out = run(S.steam_get_rarest_unlocks(
+        S.RarestUnlocksInput(steamid="76561197960287930", appid=1,
+                             response_format="json")))
+    d = json.loads(out)
+    assert d["unlocked_count"] == 2
+    assert d["rarest"][0]["name"] == "Ach A"        # 5% rarer than 80%
+    assert d["rarest"][0]["global_pct"] == 5.0
+
+
+def test_friends_who_own(monkeypatch):
+    async def fake_steam(path, params, **k):
+        if "GetFriendList" in path:
+            return {"friendslist": {"friends": [
+                {"steamid": "1"}, {"steamid": "2"}, {"steamid": "3"}]}}
+        if "GetOwnedGames" in path:
+            fid = params["steamid"]
+            if fid == "1":
+                return {"response": {"game_count": 5,
+                                     "games": [{"appid": 730, "playtime_forever": 600}]}}
+            if fid == "2":
+                return {"response": {"game_count": 3, "games": [{"appid": 10}]}}  # not 730
+            return {"response": {}}                  # fid 3: private library
+        if "GetPlayerSummaries" in path:
+            return {"response": {"players": [
+                {"steamid": "1", "personaname": "Alice", "personastate": 1,
+                 "gameid": "730", "gameextrainfo": "CS2"}]}}
+        return {}
+
+    async def fake_app_price(appid, cc):
+        return {"name": "Counter-Strike 2"}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(S, "_app_price", fake_app_price)
+    out = run(S.steam_find_friends_who_own(
+        S.FriendsWhoOwnInput(steamid="76561197960287930", appid=730,
+                             response_format="json")))
+    d = json.loads(out)
+    assert d["game"] == "Counter-Strike 2"
+    assert d["total_friends"] == 3 and d["checked"] == 3
+    assert d["owners"] == 1 and d["private_or_unknown"] == 1
+    assert d["friends"][0]["name"] == "Alice"
+    assert d["friends"][0]["playing_now"] is True
+    assert d["friends"][0]["playtime_hours"] == 10.0
