@@ -22,6 +22,7 @@ Account / profile (needs a public profile):
 - "Which achievements am I still missing in Hollow Knight?"
 - "What's my Steam level?" / "Does this account have any VAC bans?"
 - "What's on my wishlist, and is any of it on sale right now?"
+- "Analyze my library — what's my backlog and what have I abandoned?"
 
 Account-independent (works for any game, no SteamID needed):
 - "Is *Baldur's Gate 3* any good? What's its review score?"
@@ -40,6 +41,7 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_get_player_summary` | Status (Online/Away/In-Game…), current game, for 1–100 users | yes |
 | `steam_get_friend_list` | Friends enriched with name + live status | yes |
 | `steam_get_owned_games` | Owned games with total/recent hours (sortable) | yes |
+| `steam_analyze_library` | **Backlog, playtime distribution, abandoned games** across a whole library | yes |
 | `steam_get_recently_played_games` | Last-2-weeks playtime | yes |
 | `steam_get_steam_level` | Steam community level | yes |
 | `steam_get_player_bans` | VAC / game / community / economy bans | yes |
@@ -47,7 +49,7 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_get_game_schema` | A game's full achievement/stat definitions | yes |
 | `steam_get_global_achievement_percentages` | Achievement rarity (global %) | no |
 | `steam_search_apps` | Game title → appid (+ price) | no |
-| `steam_get_app_details` | Description, price, genres, release date, Metacritic | no |
+| `steam_get_app_details` | **Full store details** — play modes/co-op, controller, DLC, languages, requirements, Metacritic | no |
 | `steam_get_app_reviews` | Lifetime verdict, +/- counts, sample reviews; optional **recent (last-N-days) score** via `review_filter='recent'` | no |
 | `steam_get_featured_specials` | Games currently on sale (regional) | no |
 | `steam_get_store_highlights` | **Top sellers, new releases, or coming soon** | no |

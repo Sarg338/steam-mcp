@@ -341,6 +341,16 @@ class AppDetailsInput(BaseModel):
         min_length=2,
         max_length=2,
     )
+    include_requirements: bool = Field(
+        default=True,
+        description="Include a short PC system-requirements summary "
+        "(minimum + recommended).",
+    )
+    include_long_description: bool = Field(
+        default=False,
+        description="Include the full 'about the game' text (large). Off by "
+        "default; the short description is always included.",
+    )
     response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
 
 
@@ -1152,17 +1162,24 @@ async def steam_search_apps(params: AppSearchInput) -> str:
     },
 )
 async def steam_get_app_details(params: AppDetailsInput) -> str:
-    """Get store details for a game: description, price, genres, release date.
+    """Get comprehensive store details for a game — the best 'tell me about X' tool.
 
-    Use this for "what is this game about", "how much does X cost", "when did X
-    release". Does not require an API key.
+    Returns name, type, price/discount, developers & publishers, genres, release
+    date, Metacritic, review count, achievement count, supported languages (and
+    which have full audio), platforms, DLC, mature-content flags, and — most
+    usefully — play modes and features derived from Steam's category list. Also
+    exposes a `features` object of boolean flags so an LLM can filter directly
+    (is_singleplayer, is_coop, is_online_coop, is_local_coop,
+    has_controller_support, has_cloud_saves, has_trading_cards,
+    remote_play_together, family_sharing, vr_support, anti_cheat). Optionally
+    includes PC system requirements. No API key required.
 
     Args:
-        params (AppDetailsInput): appid, country_code.
+        params (AppDetailsInput): appid, country_code, include_requirements,
+            include_long_description.
 
     Returns:
-        str: Markdown or JSON. name, type, is_free, price, genres, release_date,
-        short_description, metacritic (if any), website.
+        str: Markdown or JSON containing all of the above.
     """
     try:
         data = await _store_get(
@@ -1172,37 +1189,142 @@ async def steam_get_app_details(params: AppDetailsInput) -> str:
         entry = data.get(str(params.appid), {})
         if not entry.get("success"):
             return f"No store details found for app {params.appid}."
-        d = entry["data"]
-        price = d.get("price_overview", {})
+        d = entry.get("data", {})
+
+        cats = [c.get("description", "") for c in d.get("categories", [])]
+        cats_l = [c.lower() for c in cats]
+
+        def _has(*subs):
+            return any(any(sub in c for c in cats_l) for sub in subs)
+
+        price = d.get("price_overview") or {}
+        platforms = [k for k, v in (d.get("platforms") or {}).items() if v]
+        langs, audio_langs = _parse_languages(d.get("supported_languages", ""))
+        try:
+            req_age = int(d.get("required_age") or 0)
+        except (TypeError, ValueError):
+            req_age = 0
+        cd = d.get("content_descriptors") or {}
+        pcr = d.get("pc_requirements")
+        pcr = pcr if isinstance(pcr, dict) else {}
+
+        features = {
+            "is_singleplayer": _has("single-player"),
+            "is_multiplayer": _has("multi-player", "pvp", "mmo"),
+            "is_coop": _has("co-op"),
+            "is_online_coop": _has("online co-op"),
+            "is_local_coop": _has("shared/split screen co-op", "local co-op"),
+            "has_controller_support": d.get("controller_support") in ("full", "partial")
+            or _has("controller support"),
+            "has_cloud_saves": _has("steam cloud"),
+            "has_trading_cards": _has("trading cards"),
+            "has_achievements": _has("steam achievements")
+            or bool((d.get("achievements") or {}).get("total")),
+            "remote_play_together": _has("remote play together"),
+            "family_sharing": _has("family sharing"),
+            "vr_support": _has("vr "),
+            "anti_cheat": _has("anti-cheat"),
+        }
+
         summary = {
             "appid": params.appid,
             "name": d.get("name"),
             "type": d.get("type"),
-            "is_free": d.get("is_free"),
-            "price": price.get("final_formatted") if price else ("Free" if d.get("is_free") else None),
-            "discount_pct": price.get("discount_percent") if price else 0,
-            "genres": [g["description"] for g in d.get("genres", [])],
-            "release_date": d.get("release_date", {}).get("date"),
+            "is_free": d.get("is_free", False),
+            "price": (price.get("final_formatted") or None)
+            if price else ("Free" if d.get("is_free") else None),
+            "initial_price": (price.get("initial_formatted") or None) if price else None,
+            "discount_pct": price.get("discount_percent", 0) if price else 0,
+            "developers": d.get("developers", []),
+            "publishers": d.get("publishers", []),
+            "release_date": (d.get("release_date") or {}).get("date"),
+            "coming_soon": (d.get("release_date") or {}).get("coming_soon", False),
+            "genres": [g.get("description") for g in d.get("genres", [])],
+            "categories": cats,
+            "features": features,
+            "controller_support": d.get("controller_support"),
+            "platforms": platforms,
             "metacritic": (d.get("metacritic") or {}).get("score"),
+            "metacritic_url": (d.get("metacritic") or {}).get("url"),
+            "recommendations_total": (d.get("recommendations") or {}).get("total"),
+            "achievements_total": (d.get("achievements") or {}).get("total"),
+            "dlc": d.get("dlc", []),
+            "dlc_count": len(d.get("dlc", [])),
+            "required_age": req_age,
+            "mature_content": _strip_html(cd.get("notes")) if cd.get("notes") else None,
+            "supported_languages": langs,
+            "full_audio_languages": audio_langs,
             "website": d.get("website"),
-            "short_description": d.get("short_description"),
+            "short_description": _strip_html(d.get("short_description"), 600),
         }
+        if params.include_requirements and pcr:
+            def _req(v):
+                v = _strip_html(v, 500)
+                return re.sub(r"^(Minimum|Recommended)\s*:\s*", "", v, flags=re.I) if v else v
+            summary["pc_requirements"] = {
+                "minimum": _req(pcr.get("minimum")),
+                "recommended": _req(pcr.get("recommended")),
+            }
+        if params.include_long_description:
+            summary["about_the_game"] = _strip_html(d.get("about_the_game"), 2000)
+
         if params.response_format == ResponseFormat.JSON:
             return _dump(summary)
 
+        mode_set = {
+            "Single-player", "Multi-player", "Co-op", "Online Co-op", "Online PvP",
+            "Shared/Split Screen Co-op", "Shared/Split Screen PvP", "MMO",
+            "Cross-Platform Multiplayer", "LAN Co-op", "LAN PvP", "PvP",
+        }
+        modes = [c for c in cats if c in mode_set]
+        price_str = summary["price"] or ("Free" if summary["is_free"] else "Unknown")
+        if summary["discount_pct"]:
+            price_str += f" ({summary['discount_pct']}% off)"
+
         lines = [
             f"# {summary['name']} (appid {params.appid})",
-            f"- **Type**: {summary['type']}",
-            f"- **Price**: {summary['price'] or 'Unknown'}"
-            + (f" ({summary['discount_pct']}% off)" if summary["discount_pct"] else ""),
+            f"- **Type / Price**: {summary['type']} · {price_str}",
+            f"- **Developer / Publisher**: "
+            f"{', '.join(summary['developers']) or 'n/a'} / "
+            f"{', '.join(summary['publishers']) or 'n/a'}",
+            f"- **Released**: {summary['release_date'] or 'n/a'}"
+            + (" (coming soon)" if summary["coming_soon"] else ""),
             f"- **Genres**: {', '.join(summary['genres']) or 'n/a'}",
-            f"- **Released**: {summary['release_date'] or 'n/a'}",
+            f"- **Platforms**: {', '.join(platforms) or 'n/a'}",
+            f"- **Play modes**: {', '.join(modes) or 'n/a'}",
+            f"- **Controller**: {summary['controller_support'] or 'none'}",
         ]
         if summary["metacritic"]:
             lines.append(f"- **Metacritic**: {summary['metacritic']}")
+        if summary["recommendations_total"]:
+            lines.append(
+                f"- **Reviews**: {summary['recommendations_total']:,} recommendations"
+            )
+        if summary["achievements_total"]:
+            lines.append(f"- **Achievements**: {summary['achievements_total']}")
+        if summary["dlc_count"]:
+            lines.append(f"- **DLC**: {summary['dlc_count']}")
+        if langs:
+            audio = f" (full audio: {', '.join(audio_langs)})" if audio_langs else ""
+            lines.append(f"- **Languages**: {', '.join(langs)}{audio}")
+        if summary["mature_content"]:
+            age = f"{req_age}+ — " if req_age else ""
+            lines.append(f"- **Content notes**: {age}{summary['mature_content']}")
+        flags = [k.replace("_", " ") for k, v in features.items() if v]
+        if flags:
+            lines.append(f"- **Features**: {', '.join(flags)}")
         if summary["short_description"]:
-            lines.append("")
-            lines.append(summary["short_description"])
+            lines += ["", summary["short_description"]]
+        if summary.get("pc_requirements"):
+            lines += ["", "## PC requirements"]
+            if summary["pc_requirements"].get("minimum"):
+                lines.append(f"**Minimum:** {summary['pc_requirements']['minimum']}")
+            if summary["pc_requirements"].get("recommended"):
+                lines.append(
+                    f"**Recommended:** {summary['pc_requirements']['recommended']}"
+                )
+        if summary.get("about_the_game"):
+            lines += ["", "## About", summary["about_the_game"]]
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001
         return _handle_error(e)
@@ -2037,6 +2159,249 @@ async def steam_compare_players(params: ComparePlayersInput) -> str:
                 f"- **{s['name']}** (appid {s['appid']}): "
                 f"A {s['hours_a']}h / B {s['hours_b']}h → {who}"
             )
+        return "\n".join(lines)
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
+
+
+# ---------------------------------------------------------------------------
+# Helpers + library analysis
+# ---------------------------------------------------------------------------
+
+def _strip_html(s, limit: int = 600):
+    """Strip HTML tags/entities to readable plain text, truncated to `limit`."""
+    if not s:
+        return None
+    import html as _html
+    s = re.sub(r"<\s*br\s*/?>", " ", s)
+    s = re.sub(r"<[^>]+>", " ", s)
+    s = _html.unescape(s)
+    s = re.sub(r"\s+", " ", s).strip()
+    if not s:
+        return None
+    return (s[: limit - 1] + "…") if len(s) > limit else s
+
+
+def _parse_languages(html_str):
+    """Parse Steam's supported_languages HTML into (all, full_audio) name lists.
+
+    Steam marks full-audio languages with an asterisk, e.g.
+    'English<strong>*</strong>, French, German<br><strong>*</strong>languages...'.
+    """
+    if not html_str:
+        return [], []
+    head = re.split(r"<\s*br\s*/?>", html_str)[0]
+    out, audio = [], []
+    for seg in head.split(","):
+        full = "*" in seg
+        name = re.sub(r"<[^>]+>", "", seg).replace("*", "").strip()
+        if name:
+            out.append(name)
+            if full:
+                audio.append(name)
+    return out, audio
+
+
+def _ts_to_date(ts):
+    """Unix seconds -> 'YYYY-MM-DD'. None for missing/sentinel values (pre-2001).
+
+    Steam only began recording last-played timestamps ~2019; older plays carry a
+    tiny placeholder value, so anything before 2001 is treated as 'unknown'.
+    """
+    try:
+        if not ts or ts < 1_000_000_000:
+            return None
+        import datetime as _dt
+        return _dt.datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+class LibraryAnalysisInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    steamid: str = Field(
+        ...,
+        description="SteamID64, vanity name, or profile URL of the library owner.",
+        min_length=1,
+        max_length=200,
+    )
+    top_limit: int = Field(
+        default=10, description="How many most-played games to list (1-50).",
+        ge=1, le=50,
+    )
+    backlog_limit: int = Field(
+        default=25, description="How many never-played games to list (0-100).",
+        ge=0, le=100,
+    )
+    stale_days: int = Field(
+        default=365,
+        description="A played game untouched for at least this many days is "
+        "counted as 'abandoned' (30-3650).",
+        ge=30, le=3650,
+    )
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+@mcp.tool(
+    name="steam_analyze_library",
+    annotations={
+        "title": "Analyze Steam Library / Backlog",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
+    """Analyze a whole game library: backlog, playtime distribution, abandoned games.
+
+    Answers "what should I play", "what have I never touched", "where do my hours
+    go", and "what did I love but abandon". Computed from a single owned-games
+    call, so it spans the entire library cheaply. Requires the profile's Game
+    Details to be Public. Needs an API key.
+
+    Reports total games and hours; the never-played backlog; a playtime histogram
+    (0h / <1h / 1-5h / 5-20h / 20-100h / 100h+); most-played games; recently active
+    games; and 'abandoned' games (played, but not launched within `stale_days`).
+    Steam only began recording last-played dates ~2019, so games last played before
+    then show 'last played: unknown' rather than a date.
+
+    Args:
+        params (LibraryAnalysisInput): steamid, top_limit, backlog_limit, stale_days.
+
+    Returns:
+        str: Markdown or JSON with summary stats, playtime_buckets, top_played,
+        recently_played, backlog_never_played, and abandoned lists.
+    """
+    try:
+        import time as _time
+        sid = await _resolve_steamid(params.steamid)
+        data = await _steam_get(
+            "IPlayerService/GetOwnedGames/v1/",
+            {"steamid": sid, "include_appinfo": 1, "include_played_free_games": 1},
+        )
+        resp = data.get("response", {})
+        games = resp.get("games", [])
+        if not games:
+            return (
+                "No games returned. The profile's Game Details are likely private, "
+                "or it owns no games."
+            )
+        game_count = resp.get("game_count", len(games))
+        cutoff = _time.time() - params.stale_days * 86400
+
+        total_min = sum(g.get("playtime_forever", 0) for g in games)
+        played = [g for g in games if g.get("playtime_forever", 0) > 0]
+        never = [g for g in games if g.get("playtime_forever", 0) == 0]
+
+        buckets = {"0h": 0, "under_1h": 0, "1_5h": 0, "5_20h": 0,
+                   "20_100h": 0, "over_100h": 0}
+        for g in games:
+            h = g.get("playtime_forever", 0) / 60
+            if h == 0:
+                buckets["0h"] += 1
+            elif h < 1:
+                buckets["under_1h"] += 1
+            elif h < 5:
+                buckets["1_5h"] += 1
+            elif h < 20:
+                buckets["5_20h"] += 1
+            elif h < 100:
+                buckets["20_100h"] += 1
+            else:
+                buckets["over_100h"] += 1
+
+        def _row(g):
+            return {
+                "appid": g.get("appid"),
+                "name": g.get("name"),
+                "hours": _minutes_to_hours(g.get("playtime_forever")),
+                "last_played": _ts_to_date(g.get("rtime_last_played")),
+            }
+
+        top_played = [
+            _row(g) for g in sorted(
+                played, key=lambda g: g.get("playtime_forever", 0), reverse=True
+            )[: params.top_limit]
+        ]
+        recent = sorted(
+            [g for g in games if g.get("playtime_2weeks")],
+            key=lambda g: g.get("playtime_2weeks", 0), reverse=True,
+        )
+        recently_played = [
+            {"appid": g.get("appid"), "name": g.get("name"),
+             "hours_2weeks": _minutes_to_hours(g.get("playtime_2weeks"))}
+            for g in recent[:10]
+        ]
+        abandoned_src = [
+            g for g in played
+            if 1_000_000_000 < g.get("rtime_last_played", 0) < cutoff
+        ]
+        abandoned = [
+            _row(g) for g in sorted(
+                abandoned_src, key=lambda g: g.get("rtime_last_played", 0)
+            )[: params.backlog_limit]
+        ]
+        backlog = [
+            {"appid": g.get("appid"), "name": g.get("name")}
+            for g in sorted(never, key=lambda g: (g.get("name") or "").lower())[
+                : params.backlog_limit
+            ]
+        ]
+
+        total_hours = round(total_min / 60, 1)
+        summary = {
+            "game_count": game_count,
+            "total_hours": total_hours,
+            "played_count": len(played),
+            "never_played_count": len(never),
+            "never_played_pct": round(100 * len(never) / game_count, 1) if game_count else 0,
+            "avg_hours_per_owned_game": round(total_hours / game_count, 1) if game_count else 0,
+            "avg_hours_per_played_game": round(total_hours / len(played), 1) if played else 0,
+        }
+
+        if params.response_format == ResponseFormat.JSON:
+            return _dump({
+                "steamid": sid,
+                "summary": summary,
+                "playtime_buckets": buckets,
+                "top_played": top_played,
+                "recently_played": recently_played,
+                "backlog_never_played": backlog,
+                "abandoned": abandoned,
+            })
+
+        lines = [
+            f"# Library analysis for {sid}",
+            f"- **Games owned**: {game_count}  |  **Total played**: {total_hours:,.1f}h",
+            f"- **Never played**: {len(never)} ({summary['never_played_pct']}% of library)",
+            f"- **Avg hours/game**: {summary['avg_hours_per_owned_game']} owned, "
+            f"{summary['avg_hours_per_played_game']} of played",
+            "",
+            "## Playtime distribution",
+            f"- never: {buckets['0h']} · <1h: {buckets['under_1h']} · "
+            f"1-5h: {buckets['1_5h']} · 5-20h: {buckets['5_20h']} · "
+            f"20-100h: {buckets['20_100h']} · 100h+: {buckets['over_100h']}",
+            "",
+            "## Most played",
+        ]
+        for g in top_played:
+            lp = f", last played {g['last_played']}" if g["last_played"] else ""
+            lines.append(f"- **{g['name']}** — {g['hours']}h{lp}")
+        if abandoned:
+            lines += ["", f"## Abandoned (played, untouched {params.stale_days}+ days)"]
+            for g in abandoned:
+                lines.append(
+                    f"- **{g['name']}** — {g['hours']}h, last played {g['last_played']}"
+                )
+        if backlog:
+            lines += [
+                "",
+                f"## Backlog — never played ({len(never)} total, showing {len(backlog)})",
+            ]
+            for g in backlog:
+                lines.append(f"- {g['name']} (appid {g['appid']})")
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001
         return _handle_error(e)
