@@ -8,6 +8,7 @@ import json
 import logging
 
 import pytest
+from pydantic import ValidationError
 
 import steam_mcp.server as S
 
@@ -842,6 +843,41 @@ def test_analyze_library_abandoned_decoupled(monkeypatch):
     assert j["abandoned_truncated"] is True
     # Defaults: dedicated 25-game abandoned cap, independent of backlog.
     assert S.LibraryAnalysisInput(steamid="x").abandoned_limit == 25
+
+
+def test_analyze_library_abandoned_sort(monkeypatch):
+    # A..E with increasing last_played (A oldest, E newest) and varied playtime,
+    # so the three sort orders are all distinguishable.
+    old = 1_500_000_000
+    pt = {"A": 600, "B": 100, "C": 500, "D": 200, "E": 50}
+    games = [
+        {"appid": i, "name": ch, "playtime_forever": pt[ch],
+         "rtime_last_played": old + i}
+        for i, ch in enumerate("ABCDE", start=1)
+    ]
+    payload = {"response": {"game_count": 5, "games": games}}
+
+    async def fake_steam(path, params, **k):
+        return payload
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+
+    def order(**kw):
+        out = run(S.steam_analyze_library(S.LibraryAnalysisInput(
+            steamid="76561197960287930", response_format="json", **kw)))
+        return [g["name"] for g in json.loads(out)["abandoned"]]
+
+    # Default is 'recent' => most recently dropped first (the ISSUE-2 fix).
+    assert order() == ["E", "D", "C", "B", "A"]
+    assert S.LibraryAnalysisInput(steamid="x").abandoned_sort == "recent"
+    assert order(abandoned_sort="oldest") == ["A", "B", "C", "D", "E"]
+    assert order(abandoned_sort="playtime") == ["A", "C", "D", "B", "E"]
+
+    # Truncation now keeps the most recent, not the most ancient.
+    assert order(abandoned_limit=2) == ["E", "D"]
+
+    with pytest.raises(ValidationError):
+        S.LibraryAnalysisInput(steamid="x", abandoned_sort="bogus")
 
 
 def test_app_details_features(monkeypatch):

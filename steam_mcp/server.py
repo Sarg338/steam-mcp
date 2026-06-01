@@ -3520,9 +3520,14 @@ class LibraryAnalysisInput(BaseModel):
     abandoned_limit: int = Field(
         default=25,
         description="How many 'abandoned' games to list (0-100). Independent of "
-        "backlog_limit; the list is sorted most-stale-first, so this keeps the games "
-        "you dropped longest ago.",
+        "backlog_limit; ordered by abandoned_sort.",
         ge=0, le=100,
+    )
+    abandoned_sort: str = Field(
+        default="recent",
+        description="Order for the abandoned list: 'recent' (most recently dropped "
+        "first — the most actionable to resume), 'oldest' (longest-dropped first), "
+        "or 'playtime' (most hours sunk first).",
     )
     stale_days: int = Field(
         default=365,
@@ -3531,6 +3536,16 @@ class LibraryAnalysisInput(BaseModel):
         ge=30, le=3650,
     )
     response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+    @field_validator("abandoned_sort")
+    @classmethod
+    def _check_abandoned_sort(cls, v: str) -> str:
+        v = v.lower().strip()
+        if v not in {"recent", "oldest", "playtime"}:
+            raise ValueError(
+                "abandoned_sort must be 'recent', 'oldest', or 'playtime'"
+            )
+        return v
 
 
 @mcp.tool(
@@ -3565,7 +3580,7 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
 
     Args:
         params (LibraryAnalysisInput): steamid, top_limit, backlog_limit,
-            abandoned_limit, stale_days.
+            abandoned_limit, abandoned_sort, stale_days.
 
     Returns:
         str: Markdown or JSON with summary stats, playtime_buckets, top_played,
@@ -3635,10 +3650,17 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
             g for g in played
             if 1_000_000_000 < g.get("rtime_last_played", 0) < cutoff
         ]
+        if params.abandoned_sort == "oldest":
+            _akey, _arev = (lambda g: g.get("rtime_last_played", 0)), False
+        elif params.abandoned_sort == "playtime":
+            _akey, _arev = (lambda g: g.get("playtime_forever", 0)), True
+        else:  # 'recent' (default) — most recently dropped first
+            _akey, _arev = (lambda g: g.get("rtime_last_played", 0)), True
         abandoned = [
-            _row(g) for g in sorted(
-                abandoned_src, key=lambda g: g.get("rtime_last_played", 0)
-            )[: params.abandoned_limit]
+            _row(g)
+            for g in sorted(abandoned_src, key=_akey, reverse=_arev)[
+                : params.abandoned_limit
+            ]
         ]
         abandoned_truncated = len(abandoned) < len(abandoned_src)
         backlog = [

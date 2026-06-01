@@ -7,13 +7,13 @@
     "url": "https://github.com/Sarg338/steam-mcp",
     "source": "github"
   },
-  "version": "1.5.0",
+  "version": "1.6.0",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "steam-mcp",
-      "version": "1.5.0",
+      "version": "1.6.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"

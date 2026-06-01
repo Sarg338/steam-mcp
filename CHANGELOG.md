@@ -3,6 +3,22 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.6.0]
+
+### Added
+- **`steam_analyze_library` gains an `abandoned_sort` parameter** —
+  `recent` (default), `oldest`, or `playtime`.
+
+### Fixed
+- **The Abandoned list now surfaces recently-dropped games first.** It was sorted
+  oldest-last-played first, so on a library with a big pile of long-ago abandons
+  the truncated list was entirely ancient games and a title dropped a few months
+  ago never appeared — the opposite of what "what should I play next" wants. The
+  default order is now most-recently-dropped first (`abandoned_sort="recent"`), with
+  `oldest` (the previous behavior) and `playtime` (most hours sunk first — the
+  strongest re-engagement signal) available as alternatives. Output-ordering +
+  additive-parameter change; no schema/field removals, backward-compatible.
+
 ## [1.5.0]
 
 ### Added
@@ -278,6 +294,7 @@ changes will require a 2.0.
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[1.6.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.6.0
 [1.5.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.5.0
 [1.4.3]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.4.3
 [1.4.2]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.4.2
