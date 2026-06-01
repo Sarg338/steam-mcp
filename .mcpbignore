@@ -25,6 +25,7 @@ _pack_only.bat
 
 # VCS / tooling
 .git/
+.gitattributes
 .mypy_cache/
 .pytest_cache/
 PUBLISHING.md
