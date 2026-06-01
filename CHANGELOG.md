@@ -3,6 +3,27 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.0]
+
+### Added
+- **`steam_analyze_library` now excludes non-retail clients by default** — betas,
+  playtests, demos, trials, test servers, staging branches, and prototypes. These
+  show up in Steam's owned-games list as ordinary games (often with real playtime),
+  but they're frequently unlaunchable, so recommending one as "play next" is dead on
+  arrival. They're detected by name (Steam's owned-games payload carries no type, so
+  this is a best-effort heuristic tuned for precision — retail titles like
+  *Prototype*, *Prototype 2*, *Trials Rising*, and *Alpha Protocol* are **not**
+  flagged). The filtering is never silent: the excluded count appears in every
+  response (`summary.temp_clients_excluded` + a Markdown note), the excluded names
+  are listed in JSON (`temp_clients_excluded_names`), and a new
+  **`exclude_temp_clients`** parameter (default `true`) turns it off to include
+  everything in all stats and lists.
+
+### Changed
+- With filtering on (the default), the summary stats — games owned, total played,
+  both averages, and the playtime distribution buckets — now reflect retail games
+  only. The excluded count is always reported so the delta is explicit.
+
 ## [1.6.1]
 
 ### Changed
@@ -304,6 +325,7 @@ changes will require a 2.0.
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[1.7.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.0
 [1.6.1]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.6.1
 [1.6.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.6.0
 [1.5.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.5.0

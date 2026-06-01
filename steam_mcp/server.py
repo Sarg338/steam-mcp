@@ -3497,6 +3497,34 @@ def _ts_to_date(ts):
         return None
 
 
+# Beta/playtest/demo/test clients show up in GetOwnedGames as ordinary "games"
+# (often with real accrued playtime) but are frequently unlaunchable, so
+# recommending them as "play next" is dead on arrival. We detect them by name
+# (GetOwnedGames carries no type/metadata) — best-effort, tuned for precision so
+# real games aren't hidden. Multi-word / unambiguous markers, matched anywhere:
+_TEMP_PHRASE_RE = re.compile(
+    r"\b(?:playtest|public test|test server|closed beta|open beta|beta demo|"
+    r"staging branch|pts)\b",
+    re.IGNORECASE,
+)
+# Risky single tokens that also occur in real titles ("Prototype", "Prototype 2",
+# "Trials Rising", "Alpha Protocol") — only a signal when they TRAIL a real title
+# word (e.g. "PAYDAY 3 - Beta", "Knockout City Trial", "Spacebase DF-9 Prototype"),
+# never as the whole or leading title.
+_TEMP_SUFFIX_RE = re.compile(
+    r"\w[\w'’.]*[\s_]*[-:–—]?\s*(?:beta|demo|trial|prototype)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_temp_client(name: str) -> bool:
+    """Heuristic: does this name look like a non-retail client (beta, playtest,
+    demo, trial, test server, staging branch, prototype) rather than a shipped
+    game? Name-based and best-effort, tuned to avoid hiding real games."""
+    n = (name or "").strip()
+    return bool(_TEMP_PHRASE_RE.search(n) or _TEMP_SUFFIX_RE.search(n))
+
+
 class LibraryAnalysisInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
@@ -3534,6 +3562,13 @@ class LibraryAnalysisInput(BaseModel):
         description="A played game untouched for at least this many days is "
         "counted as 'abandoned' (30-3650).",
         ge=30, le=3650,
+    )
+    exclude_temp_clients: bool = Field(
+        default=True,
+        description="Exclude non-retail clients (betas, playtests, demos, trials, "
+        "test servers, staging branches, prototypes) — they're often unlaunchable, "
+        "so they pollute 'what to play next'. Detected by name; the excluded count "
+        "is always reported. Set false to include them in every stat and list.",
     )
     response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
 
@@ -3578,9 +3613,15 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
     the output is flagged truncated (`backlog_truncated`) — see the full set before
     recommending, not just the early letters of the alphabet.
 
+    By default, non-retail clients (betas, playtests, demos, trials, test servers,
+    staging branches, prototypes) are excluded from every stat and list, since
+    they're often unlaunchable and pollute "what to play next"; they're detected by
+    name (best-effort) and the excluded count is always reported. Pass
+    `exclude_temp_clients=false` to include them.
+
     Args:
         params (LibraryAnalysisInput): steamid, top_limit, backlog_limit,
-            abandoned_limit, abandoned_sort, stale_days.
+            abandoned_limit, abandoned_sort, stale_days, exclude_temp_clients.
 
     Returns:
         str: Markdown or JSON with summary stats, playtime_buckets, top_played,
@@ -3594,13 +3635,24 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
             {"steamid": sid, "include_appinfo": 1, "include_played_free_games": 1},
         )
         resp = data.get("response", {})
-        games = resp.get("games", [])
-        if not games:
+        all_games = resp.get("games", [])
+        if not all_games:
             return (
                 "No games returned. The profile's Game Details are likely private, "
                 "or it owns no games."
             )
-        game_count = resp.get("game_count", len(games))
+        if params.exclude_temp_clients:
+            temp_clients = [
+                g for g in all_games if _is_temp_client(g.get("name", ""))
+            ]
+            games = [
+                g for g in all_games if not _is_temp_client(g.get("name", ""))
+            ]
+        else:
+            temp_clients = []
+            games = all_games
+        temp_excluded = len(temp_clients)
+        game_count = len(games)
         cutoff = _time.time() - params.stale_days * 86400
 
         total_min = sum(g.get("playtime_forever", 0) for g in games)
@@ -3680,6 +3732,7 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
             "never_played_pct": round(100 * len(never) / game_count, 1) if game_count else 0,
             "avg_hours_per_owned_game": round(total_hours / game_count, 1) if game_count else 0,
             "avg_hours_per_played_game": round(total_hours / len(played), 1) if played else 0,
+            "temp_clients_excluded": temp_excluded,
         }
 
         if params.response_format == ResponseFormat.JSON:
@@ -3693,12 +3746,37 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
                 "backlog_truncated": backlog_truncated,
                 "abandoned": abandoned,
                 "abandoned_truncated": abandoned_truncated,
+                "temp_clients_excluded_names": [
+                    g.get("name") for g in temp_clients[:50]
+                ],
             })
 
         lines = [
             f"# Library analysis for {sid}",
-            f"- **Games owned**: {game_count}  |  **Total played**: {total_hours:,.1f}h",
-            f"- **Never played**: {len(never)} ({summary['never_played_pct']}% of library)",
+            f"- **Games owned**: {game_count}  |  **Total played**: "
+            f"{total_hours:,.1f}h",
+            f"- **Never played**: {len(never)} "
+            f"({summary['never_played_pct']}% of library)",
+        ]
+        if temp_excluded:
+            _ex = ", ".join(g.get("name", "?") for g in temp_clients[:3])
+            _more_ex = "…" if temp_excluded > 3 else ""
+            lines.append(
+                f"- Excluded **{temp_excluded}** non-retail client(s) "
+                f"(beta/playtest/demo/test), e.g. {_ex}{_more_ex}. Set "
+                f"exclude_temp_clients=false to include them."
+            )
+        if backlog_truncated:
+            if params.backlog_limit < 100:
+                more = "call again with backlog_limit=100 to see more"
+            else:
+                more = ("this is the 100-game max — page the rest via "
+                        "steam_get_owned_games (sort_by=name, offset=...)")
+            lines.append(
+                f"- ⚠️ **Backlog truncated**: showing {len(backlog)} of "
+                f"{len(never)} never-played (alphabetical); {more}."
+            )
+        lines += [
             f"- **Avg hours/game**: {summary['avg_hours_per_owned_game']} owned, "
             f"{summary['avg_hours_per_played_game']} of played",
             "",
@@ -3709,17 +3787,6 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
             "",
             "## Most played",
         ]
-        if backlog_truncated:
-            if params.backlog_limit < 100:
-                more = "call again with backlog_limit=100 to see more"
-            else:
-                more = ("this is the 100-game max — page the rest via "
-                        "steam_get_owned_games (sort_by=name, offset=...)")
-            lines.insert(
-                3,
-                f"- ⚠️ **Backlog truncated**: showing {len(backlog)} of "
-                f"{len(never)} never-played (alphabetical); {more}.",
-            )
         for g in top_played:
             lp = f", last played {g['last_played']}" if g["last_played"] else ""
             lines.append(f"- **{g['name']}** — {g['hours']}h{lp}")

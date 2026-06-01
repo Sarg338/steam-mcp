@@ -885,6 +885,84 @@ def test_analyze_library_abandoned_sort(monkeypatch):
         S.LibraryAnalysisInput(steamid="x", abandoned_sort="bogus")
 
 
+def test_is_temp_client():
+    temp = [
+        "Super Buckyball Tournament Playtest",
+        "Knockout City Trial",
+        "PAYDAY 3 - Beta",
+        "SMITE 2 - Public Test",
+        "Quake Champions PTS",
+        "Rust - Staging Branch",
+        "Tom Clancy's Rainbow Six Siege - Test Server",
+        "Battlerite Public Test",
+        "DEFCON Beta Demo",
+        "Spacebase DF-9 Prototype",
+        "Halo Infinite - Open Beta",
+        "Some Game - Closed Beta",
+        "Cool Game Demo",
+    ]
+    for n in temp:
+        assert S._is_temp_client(n), f"should flag: {n}"
+    # Retail titles that share tokens must NOT be flagged (precision over recall).
+    retail = [
+        "Prototype",            # the 2009 retail game
+        "Prototype 2",
+        "Trials Rising",
+        "Alpha Protocol",
+        "Counter-Strike 2",
+        "Dota 2",
+        "Half-Life 2: Episode One",
+        "The Elder Scrolls V: Skyrim",
+        "Batman: Arkham Asylum",
+        "Borderlands",
+    ]
+    for n in retail:
+        assert not S._is_temp_client(n), f"should NOT flag: {n}"
+
+
+def test_analyze_library_excludes_temp_clients(monkeypatch):
+    games = [
+        {"appid": 1, "name": "Real Game A", "playtime_forever": 600,
+         "rtime_last_played": 1700000000},
+        {"appid": 2, "name": "Real Game B", "playtime_forever": 0,
+         "rtime_last_played": 0},
+        {"appid": 3, "name": "Cool Shooter Playtest", "playtime_forever": 9000,
+         "rtime_last_played": 1700000000},
+        {"appid": 4, "name": "Big RPG - Beta", "playtime_forever": 0,
+         "rtime_last_played": 0},
+    ]
+    payload = {"response": {"game_count": 4, "games": games}}
+
+    async def fake_steam(path, params, **k):
+        return payload
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+
+    # Default: temp clients dropped from counts and every list.
+    d = json.loads(run(S.steam_analyze_library(S.LibraryAnalysisInput(
+        steamid="76561197960287930", response_format="json"))))
+    assert d["summary"]["game_count"] == 2
+    assert d["summary"]["temp_clients_excluded"] == 2
+    backlog_names = {g["name"] for g in d["backlog_never_played"]}
+    assert "Big RPG - Beta" not in backlog_names and "Real Game B" in backlog_names
+    assert "Cool Shooter Playtest" not in {g["name"] for g in d["top_played"]}
+    assert set(d["temp_clients_excluded_names"]) == {
+        "Cool Shooter Playtest", "Big RPG - Beta"}
+
+    md = run(S.steam_analyze_library(S.LibraryAnalysisInput(
+        steamid="76561197960287930")))
+    assert "Excluded **2** non-retail" in md
+
+    # Opt out: everything counted again, including the 150h playtest.
+    d2 = json.loads(run(S.steam_analyze_library(S.LibraryAnalysisInput(
+        steamid="76561197960287930", exclude_temp_clients=False,
+        response_format="json"))))
+    assert d2["summary"]["game_count"] == 4
+    assert d2["summary"]["temp_clients_excluded"] == 0
+    assert "Cool Shooter Playtest" in {g["name"] for g in d2["top_played"]}
+    assert S.LibraryAnalysisInput(steamid="x").exclude_temp_clients is True
+
+
 def test_app_details_features(monkeypatch):
     data = {"123": {"success": True, "data": {
         "name": "Game", "type": "game", "is_free": False,
