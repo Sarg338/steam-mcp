@@ -600,6 +600,48 @@ def test_user_groups(monkeypatch):
     assert d["groups"][1]["name"] == "Valve"
 
 
+def test_inventory(monkeypatch):
+    captured = {}
+
+    async def fake_raw(url, params, cache_ttl=0):
+        captured["url"] = url
+        return {"success": 1, "total_inventory_count": 503,
+                "assets": [
+                    {"classid": "a", "instanceid": "0", "amount": "2"},
+                    {"classid": "a", "instanceid": "0", "amount": "1"},
+                    {"classid": "b", "instanceid": "0", "amount": "1"}],
+                "descriptions": [
+                    {"classid": "a", "instanceid": "0", "market_name": "Booster Pack",
+                     "type": "Booster Pack", "tradable": 1, "marketable": 1},
+                    {"classid": "b", "instanceid": "0", "market_name": "Emoticon",
+                     "type": "Emoticon", "tradable": 1, "marketable": 0}]}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    out = run(S.steam_get_inventory(
+        S.InventoryInput(steamid="76561197960287930", response_format="json")))
+    d = json.loads(out)
+    assert captured["url"].endswith("/753/6")        # default app -> context auto 6
+    assert d["total_inventory_count"] == 503
+    items = {i["name"]: i for i in d["items"]}
+    assert items["Booster Pack"]["count"] == 3        # 2 + 1 aggregated
+    assert items["Booster Pack"]["marketable"] is True
+    assert items["Emoticon"]["marketable"] is False
+    assert d["items"][0]["name"] == "Booster Pack"    # most-numerous first
+
+    # a game appid auto-picks context 2
+    run(S.steam_get_inventory(S.InventoryInput(steamid="76561197960287930", appid=730)))
+    assert captured["url"].endswith("/730/2")
+
+
+def test_inventory_private(monkeypatch):
+    async def fake_raw(url, params, cache_ttl=0):
+        return None                                   # community endpoint: private/empty
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    out = run(S.steam_get_inventory(S.InventoryInput(steamid="76561197960287930")))
+    assert "private" in out.lower()
+
+
 # --------------------------------------------------------------------------- #
 # Tool logic with mocked HTTP
 # --------------------------------------------------------------------------- #
@@ -881,6 +923,7 @@ def test_tools_registered():
     assert "steam_get_app_regional_pricing" in by_name
     assert "steam_get_workshop_item" in by_name
     assert "steam_get_user_groups" in by_name
+    assert "steam_get_inventory" in by_name
     # the reviews tool takes the reviews input (has appid + review_filter),
     # not _fmt_review's raw-dict signature
     schema = json.dumps(by_name["steam_get_app_reviews"].inputSchema)

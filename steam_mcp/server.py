@@ -4139,7 +4139,7 @@ async def steam_plan_coop_night(params: PlanCoopNightInput) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tools: regional pricing, workshop items, user groups
+# Tools: regional pricing, workshop items, user groups, inventory
 # ---------------------------------------------------------------------------
 
 class RegionalPricingInput(BaseModel):
@@ -4402,6 +4402,128 @@ async def steam_get_user_groups(params: UserGroupsInput) -> str:
                 lines.append(f"- **{d['name']}**{mc} — {d['url']}")
             else:
                 lines.append(f"- gid {d['gid']} — {d['url']}")
+        return "\n".join(lines)
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
+
+
+class InventoryInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    steamid: str = Field(
+        ..., min_length=1, max_length=200,
+        description="SteamID64, vanity name, or profile URL of the inventory owner.",
+    )
+    appid: int = Field(
+        default=753, ge=1,
+        description="App whose inventory to read. 753 = Steam Community items "
+        "(trading cards, emoticons, backgrounds, gems); 730 = CS2; 440 = TF2; "
+        "570 = Dota 2; etc.",
+    )
+    context_id: Optional[int] = Field(
+        default=None, ge=1,
+        description="Inventory context within the app. Leave unset to auto-pick "
+        "(6 for app 753 / Community items, 2 for games).",
+    )
+    count: int = Field(
+        default=100, ge=1, le=2000,
+        description="Max item instances to fetch (a sample for very large "
+        "inventories).",
+    )
+    language: str = Field(
+        default="english", min_length=2, max_length=32,
+        description="Steam language name for localized item names.",
+    )
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+@mcp.tool(
+    name="steam_get_inventory",
+    annotations={
+        "title": "Get Steam Inventory",
+        "readOnlyHint": True, "destructiveHint": False,
+        "idempotentHint": True, "openWorldHint": True,
+    },
+)
+async def steam_get_inventory(params: InventoryInput) -> str:
+    """List a user's Steam inventory — game items or generic Community items.
+
+    Works for any app's inventory: a game (CS2 730, TF2 440, Dota 2 570 — items,
+    skins, cosmetics) or the **Steam Community** inventory (app 753 — trading cards,
+    emoticons, profile backgrounds, gems). Aggregates duplicate items by quantity
+    and flags whether each is tradable/marketable. The context is auto-picked from
+    the app unless you set context_id. Requires the target's **inventory privacy to
+    be Public**; no API key required (use a SteamID64 or profile URL to skip vanity
+    resolution, which does need a key).
+
+    Args:
+        params (InventoryInput): steamid, appid, context_id, count, language.
+
+    Returns:
+        str: Markdown or JSON. total_inventory_count plus items (name, type, count,
+        tradable, marketable), most-numerous first.
+    """
+    try:
+        sid = await _resolve_steamid(params.steamid)
+        ctx = (params.context_id if params.context_id is not None
+               else (6 if params.appid == 753 else 2))
+        data = await _raw_get(
+            f"https://steamcommunity.com/inventory/{sid}/{params.appid}/{ctx}",
+            {"l": params.language, "count": params.count},
+        )
+        if not data or data.get("success") != 1:
+            return (f"No inventory returned for app {params.appid} (context {ctx}). "
+                    f"The inventory is likely private, empty, or the app/context is "
+                    f"wrong (Inventory privacy must be Public).")
+
+        descs = {}
+        for d in data.get("descriptions", []) or []:
+            descs[(str(d.get("classid")), str(d.get("instanceid")))] = d
+        counts: dict = {}
+        for a in data.get("assets", []) or []:
+            key = (str(a.get("classid")), str(a.get("instanceid")))
+            counts[key] = counts.get(key, 0) + int(a.get("amount") or 1)
+
+        rows = []
+        for key, n in counts.items():
+            d = descs.get(key) or descs.get((key[0], "0"))
+            rows.append({
+                "name": (d.get("market_name") or d.get("name")) if d else None,
+                "type": d.get("type") if d else None,
+                "count": n,
+                "tradable": bool(d.get("tradable")) if d else None,
+                "marketable": bool(d.get("marketable")) if d else None,
+            })
+        rows.sort(key=lambda r: r["count"], reverse=True)
+        total = data.get("total_inventory_count", len(rows))
+        fetched = len(data.get("assets", []) or [])
+
+        if params.response_format == ResponseFormat.JSON:
+            return _dump({
+                "steamid": sid, "appid": params.appid, "context_id": ctx,
+                "total_inventory_count": total, "fetched": fetched,
+                "distinct_items": len(rows), "items": rows,
+            })
+
+        partial = (f" (sampled {fetched} of {total:,})" if total and fetched < total
+                   else "")
+        lines = [
+            f"# Inventory: {sid} — app {params.appid} (context {ctx})",
+            f"{total:,} items total{partial}; {len(rows)} distinct shown.",
+            "",
+        ]
+        for r in rows[:50]:
+            flags = []
+            if r["tradable"]:
+                flags.append("tradable")
+            if r["marketable"]:
+                flags.append("marketable")
+            flagstr = f" [{', '.join(flags)}]" if flags else ""
+            qty = f" ×{r['count']}" if r["count"] > 1 else ""
+            typ = f" — {r['type']}" if r["type"] else ""
+            lines.append(f"- **{r['name'] or 'Unknown item'}**{qty}{typ}{flagstr}")
+        if len(rows) > 50:
+            lines.append(f"- …and {len(rows) - 50} more distinct items")
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001
         return _handle_error(e)

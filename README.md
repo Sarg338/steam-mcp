@@ -51,6 +51,7 @@ Account / profile (needs a public profile):
 - "What's on my wishlist, and is any of it on sale right now?"
 - "Analyze my library — what's my backlog and what have I abandoned?"
 - "Based on what I play most, what new games should I check out?"
+- "What's in my CS2 inventory, and which items are marketable?"
 
 Account-independent (works for any game, no SteamID needed):
 - "Is *Baldur's Gate 3* any good? What's its review score?"
@@ -99,6 +100,7 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_get_featured_specials` | Games currently on sale (regional) | no |
 | `steam_get_store_highlights` | **Top sellers, new releases, or coming soon** | no |
 | `steam_get_wishlist` | **A user's wishlist, with live prices + what's on sale** | yes |
+| `steam_get_inventory` | **A user's inventory** — game items or Steam Community items (cards, emoticons…), with tradable/marketable flags | no |
 | `steam_get_player_badges` | Badges + the XP breakdown behind a Steam level | yes |
 | `steam_get_package_details` | Package/bundle price + included games | no |
 | `steam_compare_players` | Shared games between two users, with playtime | yes |

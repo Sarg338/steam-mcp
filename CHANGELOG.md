@@ -3,6 +3,15 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.0]
+
+### Added
+- `steam_get_inventory` — a user's Steam inventory for any app: a game's items
+  (CS2, TF2, Dota 2, …) or the **Steam Community** inventory (app 753 — trading
+  cards, emoticons, backgrounds, gems). Aggregates duplicates by quantity and flags
+  tradable/marketable; the context is auto-picked from the app. Requires the
+  target's inventory privacy to be Public; no API key required.
+
 ## [1.1.0]
 
 ### Added
@@ -187,6 +196,7 @@ changes will require a 2.0.
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[1.2.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.0.0
 [0.12.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v0.12.0
