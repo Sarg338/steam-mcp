@@ -3,6 +3,27 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.3]
+
+### Fixed
+- **Non-retail clients no longer distort recommendations (cross-tool sweep of the
+  1.7.0 filter).** `_taste_profile` — which seeds taste from a user's most-played
+  and recently-played games for **`steam_recommend`**, **`steam_discover`**, and
+  **`steam_should_i_buy`** — now drops betas/playtests/demos/test clients before
+  seeding, so a 165h playtest can't dominate the tag profile. **`steam_plan_coop_night`**
+  likewise skips temp clients when listing co-op suggestions (an unlaunchable beta
+  is a dead game-night pick). Behavior-only; no parameter or field changes.
+
+### Audit notes
+- Swept the sibling tools for the 1.5.0 limit-coupling bug: none recur.
+  `steam_get_owned_games`, `steam_compare_players`, `steam_recommend`, and
+  `steam_discover` each return a single bounded list, and `steam_plan_coop_night`
+  already uses independent controls (`max_friends`, `min_friends_owning`, `limit`).
+- `steam_get_owned_games` and `steam_compare_players` are intentionally left
+  unfiltered: they report a factual inventory / shared-overlap, where hiding owned
+  games would misrepresent the counts. Filtering is applied only on "what to play"
+  surfaces.
+
 ## [1.7.2]
 
 ### Changed
@@ -348,6 +369,7 @@ changes will require a 2.0.
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[1.7.3]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.3
 [1.7.2]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.2
 [1.7.1]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.1
 [1.7.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.0

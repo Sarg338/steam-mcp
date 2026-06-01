@@ -2337,11 +2337,20 @@ async def _taste_profile(sid: str, max_seed: int = 12, top_tags: int = 5) -> dic
     games = owned_d.get("response", {}).get("games", []) or []
     owned_ids = {g.get("appid") for g in games}
     name_by_id = {g.get("appid"): g.get("name") for g in games}
+    # Don't let beta/playtest/demo/test clients seed taste — a 165h playtest would
+    # otherwise dominate the tag profile (same _is_temp_client filter the library
+    # analysis uses). owned_ids stays full, since it's only used to exclude games
+    # the user already owns from recommendations.
     by_play = sorted(
-        (g for g in games if g.get("playtime_forever", 0) > 0),
+        (g for g in games
+         if g.get("playtime_forever", 0) > 0
+         and not _is_temp_client(g.get("name", ""))),
         key=lambda g: g.get("playtime_forever", 0), reverse=True,
     )
-    recent = recent_d.get("response", {}).get("games", []) or []
+    recent = [
+        g for g in (recent_d.get("response", {}).get("games", []) or [])
+        if not _is_temp_client(g.get("name", ""))
+    ]
     for g in recent:
         name_by_id.setdefault(g.get("appid"), g.get("name"))
 
@@ -4324,6 +4333,8 @@ async def steam_plan_coop_night(params: PlanCoopNightInput) -> str:
             ci = coop_info.get(a)
             if not ci or not ci.get("coop"):
                 continue
+            if _is_temp_client(ci.get("name") or ""):
+                continue  # unlaunchable beta/playtest — a dead co-op-night pick
             rows.append({
                 "appid": a, "name": ci.get("name") or f"app {a}",
                 "owner_count": len(owners),

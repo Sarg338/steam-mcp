@@ -1046,6 +1046,69 @@ def test_analyze_library_persona_header(monkeypatch):
     assert md3.split("\n")[0] == f"# Library analysis for {sid}"
 
 
+def test_taste_profile_excludes_temp_clients(monkeypatch):
+    sid = "76561197960287930"
+    owned = {"response": {"games": [
+        {"appid": 100, "name": "Real RPG", "playtime_forever": 5000},
+        {"appid": 200, "name": "Cool Shooter Playtest", "playtime_forever": 99999},
+        {"appid": 300, "name": "PAYDAY 3 - Beta", "playtime_forever": 8000},
+    ]}}
+    recent = {"response": {"games": [
+        {"appid": 200, "name": "Cool Shooter Playtest", "playtime_2weeks": 600},
+    ]}}
+
+    async def fake_steam(path, params, **k):
+        return recent if "GetRecentlyPlayed" in path else owned
+
+    seeded = {}
+
+    async def fake_items_tags(ids):
+        seeded["ids"] = list(ids)
+        return {a: [{"tagid": 1, "weight": 1}] for a in ids}
+
+    async def fake_tag_names():
+        return {1: "RPG"}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(S, "_items_tags", fake_items_tags)
+    monkeypatch.setattr(S, "_tag_name_map", fake_tag_names)
+
+    prof = run(S._taste_profile(sid))
+    # The 99,999-minute playtest and the beta must NOT seed taste.
+    assert seeded["ids"] == [100]
+    assert "Cool Shooter Playtest" not in prof["seed_games"]
+    assert "Real RPG" in prof["seed_games"]
+    # owned_ids stays full (used to exclude already-owned games from recs).
+    assert prof["owned_ids"] == {100, 200, 300}
+
+
+def test_coop_night_excludes_temp_clients(monkeypatch):
+    host = "76561197960287930"
+    friend = "76561197960287931"
+
+    async def fake_summaries(ids):
+        return {i: {"personaname": "Pal", "personastate": 1} for i in ids}
+
+    async def fake_owned_set(sid):
+        return {1, 2}
+
+    async def fake_items_coop(appids):
+        return {
+            1: {"name": "Real Coop Game", "coop": True},
+            2: {"name": "Some Game Playtest", "coop": True},
+        }
+
+    monkeypatch.setattr(S, "_summaries_for", fake_summaries)
+    monkeypatch.setattr(S, "_owned_set", fake_owned_set)
+    monkeypatch.setattr(S, "_items_coop", fake_items_coop)
+
+    d = json.loads(run(S.steam_plan_coop_night(S.PlanCoopNightInput(
+        steamid=host, friends=[friend], response_format="json"))))
+    names = {g["name"] for g in d["games"]}
+    assert "Real Coop Game" in names
+    assert "Some Game Playtest" not in names  # unlaunchable playtest skipped
+
+
 def test_app_details_features(monkeypatch):
     data = {"123": {"success": True, "data": {
         "name": "Game", "type": "game", "is_free": False,
