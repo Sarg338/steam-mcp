@@ -12,3 +12,5 @@ venv/
 # Packaging outputs (build them on release; don't commit)
 *.mcpb
 _build_out.txt
+PUBLISHING.md
+_*.bat
