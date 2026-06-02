@@ -4,6 +4,9 @@ A concise, one-line-per-change history. Versions follow
 [Semantic Versioning](https://semver.org/). Releases:
 <https://github.com/Sarg338/steam-mcp/releases>
 
+## [1.8.3]
+- Sharper descriptions on the overlapping game-finding tools (search / discover / recommend / should_i_buy / find-friends) with explicit "use this / not that" boundaries, to reduce wrong-tool selection. README notes Claude Code `--scope`.
+
 ## [1.8.2]
 - Privacy-aware errors: when a profile or sub-setting is private, each tool names the exact Steam setting to make Public (Game details / Friends List / Inventory / My profile) and links the settings page.
 

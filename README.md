@@ -30,6 +30,10 @@ Install [`uv`](https://docs.astral.sh/uv/), get a
 claude mcp add steam --env STEAM_API_KEY=YOUR_KEY -- uvx steam-mcp
 ```
 
+> Tip: this defaults to the current project. Add `--scope user` only if you want
+> Steam in *every* project — that keeps its tools in context everywhere, so prefer
+> per-project scope unless Steam is cross-cutting for you.
+
 **Claude Desktop** — download `steam-mcp.mcpb` from the
 [latest release](https://github.com/Sarg338/steam-mcp/releases/latest), open it
 (Settings → Extensions), and paste your key.

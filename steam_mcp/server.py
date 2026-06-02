@@ -1305,7 +1305,7 @@ async def _friend_owns_app(fid: str, appid: int) -> dict:
     },
 )
 async def steam_find_friends_who_own(params: FriendsWhoOwnInput) -> str:
-    """Find which of a user's friends own (or are right now playing) a given game.
+    """List which of a user's friends own (or are playing) a specific game — "who can I play X with" (about friends' libraries, not store search).
 
     Answers "who can I play X with". Cross-references the user's friend list with each
     friend's owned games, then annotates owners with their playtime and whether they
@@ -1935,7 +1935,7 @@ async def steam_get_rarest_unlocks(params: RarestUnlocksInput) -> str:
     },
 )
 async def steam_search_apps(params: AppSearchInput) -> str:
-    """Search the Steam store for games by title and return their appids.
+    """Look up a game's appid by its title — when you already know the name and need its ID (not for discovery, recommendations, or buy decisions).
 
     Use this to turn a game name into an appid for the achievement/details tools.
     Does not require an API key.
@@ -2632,7 +2632,7 @@ class DiscoverInput(BaseModel):
     },
 )
 async def steam_discover(params: DiscoverInput) -> str:
-    """Find games by filters (tags, price, sale, platform) — and optionally recommend.
+    """Discover games by criteria — tags, max price, on-sale, platform — optionally personalized to a user's taste; for filter-based search, not "games like X" (use steam_recommend for that).
 
     The discovery/recommendation tool. Filters the whole store by community tags
     (by name), max price, on-sale, platform, and free text, sorted by review score
@@ -4105,7 +4105,7 @@ class ShouldIBuyInput(BaseModel):
     },
 )
 async def steam_should_i_buy(params: ShouldIBuyInput) -> str:
-    """Gather everything needed to decide whether to buy a game, in one call.
+    """Decide whether to buy ONE specific game — price, recent + lifetime reviews, tags, Metacritic, and taste match in one call; for evaluating a single known game, not finding new ones.
 
     Fuses the decision-relevant signals: current price/discount, lifetime AND
     last-30-days review scores (the divergence shows whether a game is improving or
@@ -4275,7 +4275,7 @@ class RecommendInput(BaseModel):
     },
 )
 async def steam_recommend(params: RecommendInput) -> str:
-    """Recommend games similar to a game you love, or to your taste — with reasons.
+    """Recommend games similar to a seed game ("like Hades") or to a user's taste, explaining the shared tags; for "games like X" / "what should I play" (for filtered search use steam_discover).
 
     Pick a basis: a seed_appid ("games like Hades"), a steamid (your most-played +
     recent taste), or explicit tags. Finds well-reviewed games that share those
