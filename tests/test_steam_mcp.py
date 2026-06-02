@@ -1268,14 +1268,17 @@ def test_deck_compatibility(monkeypatch):
 
 def test_app_prices_batch_and_fallback(monkeypatch):
     # GetItems returns 10 (on sale), 11 (free); 12 is absent -> per-item fallback.
-    def _item(aid, name, free=False, final=None, disc=None):
+    def _item(aid, name, free=False, final=None, disc=None, released=None):
         bpo = {} if free else {"formatted_final_price": final, "discount_pct": disc}
-        return {"appid": aid, "name": name, "is_free": free,
-                "best_purchase_option": bpo}
+        d = {"appid": aid, "name": name, "is_free": free,
+             "best_purchase_option": bpo}
+        if released is not None:
+            d["release"] = {"steam_release_date": released}
+        return d
 
     async def fake_steam(path, params, with_key=True, cache_ttl=0):
         return {"response": {"store_items": [
-            _item(10, "OnSale", final="$5.00", disc=50),
+            _item(10, "OnSale", final="$5.00", disc=50, released=1700000000),
             _item(11, "FreeGame", free=True),
         ]}}
 
@@ -1289,8 +1292,32 @@ def test_app_prices_batch_and_fallback(monkeypatch):
     pm = run(S._app_prices([10, 11, 12], "us"))
     assert set(pm) == {10, 11, 12}
     assert pm[10]["price"] == "$5.00" and pm[10]["on_sale"] and pm[10]["discount_pct"] == 50
+    assert pm[10]["release_ts"] == 1700000000   # parsed from include_release
     assert pm[11]["is_free"] and pm[11]["price"] == "Free"
+    assert pm[11]["release_ts"] is None         # no release block -> None
     assert pm[12]["name"] == "Fallback"   # came from the single-item fallback
+
+
+def test_discover_released_within_days(monkeypatch):
+    import time as _t
+    now = _t.time()
+    rel = {1: now - 5 * 86400, 2: now - 200 * 86400, 3: now - 10 * 86400}  # 2 is old
+
+    async def fake_raw(url, params, cache_ttl=0):
+        assert params.get("sort_by") == "Released_DESC"   # window forces newest-first
+        return {"success": 1, "total_count": 100,
+                "results_html": '<a data-ds-appid="1"></a><a data-ds-appid="2"></a>'
+                                '<a data-ds-appid="3"></a>'}
+
+    async def fake_app_prices(appids, cc):
+        return {a: {"name": f"G{a}", "release_ts": int(rel[a])} for a in appids}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
+    d = json.loads(run(S.steam_discover(S.DiscoverInput(
+        released_within_days=30, response_format="json"))))
+    assert [r["appid"] for r in d["results"]] == [1, 3]   # 200-day-old #2 dropped
+    assert d["filters"]["released_within_days"] == 30
 
 
 def test_wishlist_on_sale_filter(monkeypatch):

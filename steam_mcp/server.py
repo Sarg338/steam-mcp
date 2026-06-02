@@ -2595,6 +2595,11 @@ class DiscoverInput(BaseModel):
         default=True,
         description="When steamid is set, hide games the user already owns.",
     )
+    released_within_days: Optional[int] = Field(
+        default=None, ge=1, le=3650,
+        description="Only include games released in the last N days (forces "
+        "newest-first). Use for 'what came out recently'. Omit for any release date.",
+    )
     limit: int = Field(
         default=15, description="Max results to return (1-50).", ge=1, le=50
     )
@@ -2683,6 +2688,8 @@ async def steam_discover(params: DiscoverInput) -> str:
         if params.platform:
             query["os"] = params.platform
         sort_by = _SORT_MAP.get(params.sort, "Reviews_DESC")
+        if params.released_within_days:
+            sort_by = "Released_DESC"  # a release window is inherently newest-first
         if sort_by:
             query["sort_by"] = sort_by
 
@@ -2691,8 +2698,14 @@ async def steam_discover(params: DiscoverInput) -> str:
         page = appids[: params.limit]
         pm = await _app_prices(page, cc) if page else {}
         infos = [pm.get(a, {}) for a in page]
+        cutoff = (time.time() - params.released_within_days * 86400
+                  if params.released_within_days else None)
         rows = []
         for a, info in zip(page, infos, strict=True):
+            if cutoff is not None:
+                rts = info.get("release_ts")
+                if not rts or rts < cutoff:
+                    continue  # released before the window, or release date unknown
             rows.append({
                 "appid": a,
                 "name": info.get("name") or f"app {a}",
@@ -2713,6 +2726,7 @@ async def steam_discover(params: DiscoverInput) -> str:
                     "on_sale": params.on_sale,
                     "platform": params.platform,
                     "sort": params.sort,
+                    "released_within_days": params.released_within_days,
                 },
                 "personalized": bool(params.steamid),
                 "seed_games": seed_games,
@@ -2736,7 +2750,10 @@ async def steam_discover(params: DiscoverInput) -> str:
             bits.append(params.platform)
         lines = [
             f"# Discover: {', '.join(bits) if bits else 'top games'}",
-            f"Matched {total:,} games; showing {len(rows)} (sorted by {params.sort}).",
+            f"Matched {total:,} games; showing {len(rows)}"
+            + (f" released in the last {params.released_within_days} days "
+               "(newest first)." if params.released_within_days
+               else f" (sorted by {params.sort})."),
         ]
         if params.steamid and seed_games:
             extra = f" -> tags: {', '.join(taste_tags)}" if taste_tags else ""
@@ -3029,7 +3046,8 @@ async def _app_prices(appids: list[int], cc: str = "us") -> dict[int, dict]:
             "context": {"language": "english", "country_code": cc.upper(),
                         "steam_realm": 1},
             "data_request": {"include_basic_info": True,
-                             "include_all_purchase_options": True},
+                             "include_all_purchase_options": True,
+                             "include_release": True},
         }
         data = await _steam_get(
             "IStoreBrowseService/GetItems/v1/",
@@ -3045,9 +3063,14 @@ async def _app_prices(appids: list[int], cc: str = "us") -> dict[int, dict]:
             bpo = it.get("best_purchase_option") or {}
             disc = bpo.get("discount_pct") or 0
             price = bpo.get("formatted_final_price") or ("Free" if is_free else None)
+            try:
+                rts = int((it.get("release") or {}).get("steam_release_date"))
+            except (TypeError, ValueError):
+                rts = None
             res[aid] = {
                 "appid": aid, "name": it.get("name"), "is_free": is_free,
                 "price": price, "discount_pct": disc, "on_sale": disc > 0,
+                "release_ts": rts,
             }
         return res
 

@@ -87,7 +87,7 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_get_user_game_stats` | **A user's in-game stats** (kills, wins, distance…) for a game | yes |
 | `steam_get_rarest_unlocks` | **A player's rarest achievement unlocks** in a game (by global rarity) | yes |
 | `steam_search_apps` | Game title → appid (+ price) | no |
-| `steam_discover` | **Find/recommend games** by tag, price, sale, platform — optionally **personalized** to a user's taste (excludes games they own) | no* |
+| `steam_discover` | **Find/recommend games** by tag, price, sale, platform, **release window** ("last N days") — optionally **personalized** to a user's taste (excludes games they own) | no* |
 | `steam_should_i_buy` | **Buying brief** — price, lifetime + recent reviews (trend), tags, Metacritic, and your taste match | no* |
 | `steam_recommend` | **Recommend games** like a seed game or your taste, with the shared tags as the "why" | no* |
 | `steam_get_app_details` | **Full store details** — play modes/co-op, controller, DLC, languages, requirements, Metacritic, Steam Deck | no |
