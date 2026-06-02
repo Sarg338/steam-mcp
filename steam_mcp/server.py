@@ -3759,14 +3759,18 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
                 : params.abandoned_limit
             ]
         ]
-        abandoned_truncated = len(abandoned) < len(abandoned_src)
+        # limit==0 is intentional suppression, not truncation — don't nag.
+        abandoned_truncated = (
+            params.abandoned_limit > 0 and len(abandoned) < len(abandoned_src)
+        )
         backlog = [
             {"appid": g.get("appid"), "name": g.get("name")}
             for g in sorted(never, key=lambda g: (g.get("name") or "").lower())[
                 : params.backlog_limit
             ]
         ]
-        backlog_truncated = len(backlog) < len(never)
+        # limit==0 is intentional suppression, not truncation — don't nag.
+        backlog_truncated = params.backlog_limit > 0 and len(backlog) < len(never)
 
         total_hours = round(total_min / 60, 1)
         summary = {

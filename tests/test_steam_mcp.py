@@ -808,6 +808,14 @@ def test_analyze_library_backlog_truncation(monkeypatch):
     assert json.loads(full)["backlog_truncated"] is False
     assert S.LibraryAnalysisInput(steamid="x").backlog_limit == 100
 
+    # backlog_limit=0 is intentional suppression, not truncation — no nag.
+    z = run(S.steam_analyze_library(S.LibraryAnalysisInput(
+        steamid="76561197960287930", backlog_limit=0)))
+    assert "Backlog truncated" not in z
+    assert json.loads(run(S.steam_analyze_library(S.LibraryAnalysisInput(
+        steamid="76561197960287930", backlog_limit=0,
+        response_format="json"))))["backlog_truncated"] is False
+
 
 def test_analyze_library_abandoned_decoupled(monkeypatch):
     # 5 abandoned games (played, last launched long ago). abandoned_limit must
@@ -846,6 +854,10 @@ def test_analyze_library_abandoned_decoupled(monkeypatch):
     j = json.loads(run(S.steam_analyze_library(S.LibraryAnalysisInput(
         steamid="76561197960287930", abandoned_limit=2, response_format="json"))))
     assert j["abandoned_truncated"] is True
+    # abandoned_limit=0 is intentional suppression, not truncation.
+    z = json.loads(run(S.steam_analyze_library(S.LibraryAnalysisInput(
+        steamid="76561197960287930", abandoned_limit=0, response_format="json"))))
+    assert z["abandoned"] == [] and z["abandoned_truncated"] is False
     # Defaults: dedicated 25-game abandoned cap, independent of backlog.
     assert S.LibraryAnalysisInput(steamid="x").abandoned_limit == 25
 

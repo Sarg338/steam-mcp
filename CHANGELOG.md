@@ -3,6 +3,16 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.5]
+
+### Fixed
+- **No "truncated" nag when a list limit is explicitly 0.** Calling
+  `steam_analyze_library` with `backlog_limit=0` (or `abandoned_limit=0`) used to
+  still print "⚠️ Backlog truncated: showing 0 of 90 … call again" and set
+  `backlog_truncated: true`. Asking for zero is intentional suppression, not
+  truncation — so both the warning and the JSON flag are now `false` when the limit
+  is 0.
+
 ## [1.7.4]
 
 ### Fixed
@@ -383,6 +393,7 @@ changes will require a 2.0.
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[1.7.5]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.5
 [1.7.4]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.4
 [1.7.3]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.3
 [1.7.2]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.2
