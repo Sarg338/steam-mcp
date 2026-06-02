@@ -38,3 +38,6 @@ CLAUDE.md
 
 # Tests are not needed in the runtime bundle
 tests/
+
+# Dev tooling (token-footprint audit etc.) — not part of the runtime
+scripts/
