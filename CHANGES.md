@@ -4,6 +4,9 @@ A concise, one-line-per-change history. Versions follow
 [Semantic Versioning](https://semver.org/). Releases:
 <https://github.com/Sarg338/steam-mcp/releases>
 
+## [1.8.2]
+- Privacy-aware errors: when a profile or sub-setting is private, each tool names the exact Steam setting to make Public (Game details / Friends List / Inventory / My profile) and links the settings page.
+
 ## [1.8.1]
 - Batched price lookups — one `GetItems` call per ~50 appids for wishlist / DLC / discover / recommend (fewer requests, less rate-limiting). Internal only.
 

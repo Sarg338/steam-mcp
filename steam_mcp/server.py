@@ -522,6 +522,22 @@ def _handle_error(e: Exception) -> str:
     return _scrub(f"Error: Unexpected {type(e).__name__}: {e}")
 
 
+PRIVACY_SETTINGS_URL = "https://steamcommunity.com/my/edit/settings"
+
+
+def _privacy_hint(setting: str) -> str:
+    """Actionable hint naming the exact Steam privacy sub-setting to make Public.
+
+    Phrased to cover both 'this is my own profile' and someone else's — Steam
+    privacy is granular, so the fix is usually flipping one specific sub-setting.
+    """
+    return (
+        f"If it's your profile, set **{setting}** to Public in your Steam privacy "
+        f"settings ({PRIVACY_SETTINGS_URL}); another user's data is only readable "
+        f"if they've made it public."
+    )
+
+
 async def _resolve_steamid(identifier: str) -> str:
     """Resolve a flexible identifier to a 17-digit SteamID64.
 
@@ -1040,7 +1056,8 @@ async def steam_get_player_summary(params: PlayersInput) -> str:
         summaries = await _summaries_for(resolved)
         players = [summaries[s] for s in resolved if s in summaries]
         if not players:
-            return "No player data found (profiles may be private or IDs invalid)."
+            return ("No player data found — the profile may be private, or the SteamID "
+                "is invalid. " + _privacy_hint("My profile"))
 
         if params.response_format == ResponseFormat.JSON:
             return _dump({"count": len(players), "players": players})
@@ -1087,7 +1104,8 @@ async def steam_get_steam_level(params: PlayerInput) -> str:
         data = await _steam_get("IPlayerService/GetSteamLevel/v1/", {"steamid": sid})
         level = data.get("response", {}).get("player_level")
         if level is None:
-            return "No level data (profile may be private)."
+            return ("No level data — the profile may not be public. "
+                    + _privacy_hint("My profile"))
         if params.response_format == ResponseFormat.JSON:
             return _dump({"steamid": sid, "steam_level": level})
         return f"Steam level for {sid}: {level}"
@@ -1174,8 +1192,8 @@ async def steam_get_friend_list(params: FriendListInput) -> str:
         friends = data.get("friendslist", {}).get("friends", [])
         if not friends:
             return (
-                "No friends returned. The friend list is likely private "
-                "(set Friends List to Public in Steam privacy settings)."
+                "No friends returned — the friend list isn't public (or the user "
+                "has none). " + _privacy_hint("Friends List")
             )
 
         ids = [f["steamid"] for f in friends]
@@ -1313,8 +1331,8 @@ async def steam_find_friends_who_own(params: FriendsWhoOwnInput) -> str:
         friends = fdata.get("friendslist", {}).get("friends", [])
         if not friends:
             return (
-                "No friends returned. The user's friend list is likely private "
-                "(set Friends List to Public in Steam privacy settings)."
+                "No friends returned — the user's friend list isn't public (or they "
+                "have none). " + _privacy_hint("Friends List")
             )
         all_ids = [f["steamid"] for f in friends]
         check_ids = all_ids[: params.max_friends]
@@ -1425,8 +1443,8 @@ async def steam_get_owned_games(params: OwnedGamesInput) -> str:
         games = resp.get("games", [])
         if not games:
             return (
-                "No games returned. Game details are likely private, or the user "
-                "owns no games."
+                "No games returned — the profile's Game details aren't public (or "
+                "it owns no games). " + _privacy_hint("Game details")
             )
 
         for g in games:
@@ -1509,7 +1527,8 @@ async def steam_get_recently_played_games(params: PlayerInput) -> str:
         )
         games = data.get("response", {}).get("games", [])
         if not games:
-            return "No recently played games (none in the last 2 weeks, or private)."
+            return ("No recently played games — none in the last 2 weeks, or Game "
+                    "details aren't public. " + _privacy_hint("Game details"))
 
         rows = [
             {
@@ -1572,8 +1591,9 @@ async def steam_get_player_achievements(params: PlayerGameInput) -> str:
         stats = data.get("playerstats", {})
         if not stats.get("success", False):
             return (
-                f"Error: {stats.get('error', 'No achievement data')}. The profile "
-                f"may be private, or app {params.appid} has no achievements."
+                f"Error: {stats.get('error', 'No achievement data')}. Game details "
+                f"may not be public, or app {params.appid} has no achievements. "
+                + _privacy_hint("Game details")
             )
         achievements = stats.get("achievements", [])
         total = len(achievements)
@@ -1768,7 +1788,7 @@ async def steam_get_user_game_stats(params: PlayerGameInput) -> str:
         if not stats:
             return (
                 f"No stats available for app {params.appid}. The game may define no "
-                f"stats, or the profile's Game Details are private."
+                f"stats, or Game details aren't public. " + _privacy_hint("Game details")
             )
         rows = [{"name": s.get("name"), "value": s.get("value")} for s in stats]
 
@@ -1848,8 +1868,9 @@ async def steam_get_rarest_unlocks(params: RarestUnlocksInput) -> str:
         stats = ach_data.get("playerstats", {})
         if not stats.get("success", False):
             return (
-                f"Error: {stats.get('error', 'No achievement data')}. The profile "
-                f"may be private, or app {params.appid} has no achievements."
+                f"Error: {stats.get('error', 'No achievement data')}. Game details "
+                f"may not be public, or app {params.appid} has no achievements. "
+                + _privacy_hint("Game details")
             )
         unlocked = [a for a in stats.get("achievements", []) if a.get("achieved") == 1]
         if not unlocked:
@@ -3195,8 +3216,8 @@ async def steam_get_wishlist(params: WishlistInput) -> str:
         items = data.get("response", {}).get("items", [])
         if not items:
             return (
-                "No wishlist items returned. The wishlist is empty, or its privacy "
-                "is not set to Public."
+                "No wishlist items returned — the wishlist is empty, or the profile "
+                "isn't public. " + _privacy_hint("My profile")
             )
         items.sort(key=lambda x: x.get("priority", 0))
         total = len(items)
@@ -3440,7 +3461,8 @@ async def steam_get_player_badges(params: PlayerInput) -> str:
         resp = data.get("response", {})
         badges = resp.get("badges", [])
         if not resp or resp.get("player_level") is None:
-            return "No badge data returned (the profile is likely private)."
+            return ("No badge data — the profile may not be public. "
+                    + _privacy_hint("My profile"))
         level = resp.get("player_level")
         xp = resp.get("player_xp") or 0
         to_next = resp.get("player_xp_needed_to_level_up") or 0
@@ -3594,8 +3616,8 @@ async def steam_compare_players(params: ComparePlayersInput) -> str:
         games_a, games_b = await asyncio.gather(_owned(sid_a), _owned(sid_b))
         if not games_a or not games_b:
             return (
-                "Could not compare — one or both profiles have private game details "
-                "(or own no games)."
+                "Could not compare — one or both profiles' Game details aren't "
+                "public (or own no games). " + _privacy_hint("Game details")
             )
 
         shared_ids = set(games_a) & set(games_b)
@@ -3863,8 +3885,8 @@ async def steam_analyze_library(params: LibraryAnalysisInput) -> str:
         all_games = resp.get("games", [])
         if not all_games:
             return (
-                "No games returned. The profile's Game Details are likely private, "
-                "or it owns no games."
+                "No games returned — the profile's Game details aren't public, or "
+                "it owns no games. " + _privacy_hint("Game details")
             )
         # Best-effort persona (display) name for the header — the resolver only
         # yields a SteamID64, so this is a separate, cheap lookup; failure is fine.
@@ -4500,8 +4522,8 @@ async def steam_plan_coop_night(params: PlanCoopNightInput) -> str:
             )
             fids = [f["steamid"] for f in fdata.get("friendslist", {}).get("friends", [])]
             if not fids:
-                return ("No friends returned — the host's friend list is likely "
-                        "private (set Friends List to Public).")
+                return ("No friends returned — the host's friend list isn't public. "
+                        + _privacy_hint("Friends List"))
             summaries = await _summaries_for(fids)
             group = ([g for g in fids if _is_online(summaries.get(g, {}))]
                      if params.online_only else fids)
@@ -4513,8 +4535,8 @@ async def steam_plan_coop_night(params: PlanCoopNightInput) -> str:
 
         host_owned = await _owned_set(host)
         if host_owned is None:
-            return ("Can't plan — the host's Game Details are private (set them to "
-                    "Public).")
+            return ("Can't plan — the host's Game details aren't public. "
+                    + _privacy_hint("Game details"))
 
         member_sets = await _gather_limited([_owned_set(g) for g in group])
         owners_by_app: dict = {}
@@ -4834,7 +4856,8 @@ async def steam_get_user_groups(params: UserGroupsInput) -> str:
         data = await _steam_get("ISteamUser/GetUserGroupList/v1/", {"steamid": sid})
         resp = data.get("response", {})
         if not resp.get("success"):
-            return "No group data returned (the profile is likely private)."
+            return ("No group data — the profile may not be public. "
+                    + _privacy_hint("My profile"))
         gids = [g.get("gid") for g in resp.get("groups", []) if g.get("gid")]
         if not gids:
             return f"{sid} is not in any public Steam groups."
@@ -4931,8 +4954,8 @@ async def steam_get_inventory(params: InventoryInput) -> str:
         )
         if not data or data.get("success") != 1:
             return (f"No inventory returned for app {params.appid} (context {ctx}). "
-                    f"The inventory is likely private, empty, or the app/context is "
-                    f"wrong (Inventory privacy must be Public).")
+                    f"It's empty, the app/context is wrong, or the inventory isn't "
+                    f"public. " + _privacy_hint("Inventory"))
 
         descs = {}
         for d in data.get("descriptions", []) or []:

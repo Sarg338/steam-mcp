@@ -645,7 +645,16 @@ def test_inventory_private(monkeypatch):
 
     monkeypatch.setattr(S, "_raw_get", fake_raw)
     out = run(S.steam_get_inventory(S.InventoryInput(steamid="76561197960287930")))
-    assert "private" in out.lower()
+    # Privacy-aware message: names the Inventory setting + points to the fix.
+    assert "Inventory" in out and "public" in out.lower()
+    assert "steamcommunity.com/my/edit/settings" in out
+
+
+def test_privacy_hint():
+    h = S._privacy_hint("Game details")
+    assert "Game details" in h
+    assert S.PRIVACY_SETTINGS_URL in h
+    assert "public" in h.lower()
 
 
 def test_parse_cs_attributes():
