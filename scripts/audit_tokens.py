@@ -175,12 +175,53 @@ def audit_responses() -> dict:
             "worst": worst, "rows": rows}
 
 
+# --- Exact count (opt-in: Anthropic's real tokenizer) -------------------------
+
+def exact_tool_tokens(model: str):
+    """TRUE Claude token cost of the tool definitions via Anthropic's count_tokens
+    API (not the chars/4 estimate). Needs `pip install anthropic` and
+    ANTHROPIC_API_KEY in the env.
+
+    Returns {tools_tokens, with_tools, baseline, model}, or {"error": ...} on a
+    network/auth failure, or None if the `anthropic` package isn't installed.
+    tools_tokens = (count WITH the full tool list) - (count with no tools) — i.e.
+    exactly what the server adds to a request's context.
+    """
+    try:
+        import anthropic
+    except ImportError:
+        return None
+    try:
+        client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY
+        tools = [
+            {"name": t.name, "description": t.description or "",
+             "input_schema": t.inputSchema}
+            for t in asyncio.run(mcp.list_tools())
+        ]
+        msg = [{"role": "user", "content": "."}]
+        with_tools = client.messages.count_tokens(
+            model=model, messages=msg, tools=tools).input_tokens
+        baseline = client.messages.count_tokens(
+            model=model, messages=msg).input_tokens
+        return {"tools_tokens": with_tools - baseline, "with_tools": with_tools,
+                "baseline": baseline, "model": model}
+    except Exception as e:  # noqa: BLE001 — auth/network/model errors, informational
+        return {"error": str(e)}
+
+
 # --- Report -------------------------------------------------------------------
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="steam-mcp token-footprint audit")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
+    ap.add_argument("--exact", action="store_true",
+                    help="also report the TRUE Claude token count via Anthropic's "
+                         "count_tokens API (needs `pip install anthropic` + "
+                         "ANTHROPIC_API_KEY). Informational; never gates CI.")
+    ap.add_argument("--model", default="claude-sonnet-4-6",
+                    help="model id for --exact (default: claude-sonnet-4-6)")
     args = ap.parse_args()
+    exact = exact_tool_tokens(args.model) if args.exact else None
 
     defs = audit_definitions()
     resp = audit_responses()
@@ -190,8 +231,8 @@ def main() -> int:
     ok = not (defs_over or resp_over)
 
     if args.json:
-        print(json.dumps({"ok": ok, "definitions": defs, "responses": resp},
-                         indent=2))
+        print(json.dumps({"ok": ok, "definitions": defs, "responses": resp,
+                          "exact": exact}, indent=2))
         return 0 if ok else 1
 
     saved = (1 - defs["total_tokens"] / defs["uncompacted_tokens"]) * 100 \
@@ -204,6 +245,16 @@ def main() -> int:
           f"[budget {defs['budget']:,}]  {flag}")
     print(f"  uncompacted would be ~{defs['uncompacted_tokens']:,} tokens "
           f"(_compact_descriptions saves ~{saved:.0f}%)")
+    if args.exact:
+        if exact is None:
+            print("  exact: unavailable — run `pip install anthropic` to enable")
+        elif "error" in exact:
+            print(f"  exact: unavailable — {exact['error']}")
+        else:
+            print(f"  exact (Claude count_tokens, {exact['model']}): "
+                  f"tool defs add {exact['tools_tokens']:,} tokens "
+                  f"(with tools {exact['with_tools']:,} vs baseline "
+                  f"{exact['baseline']:,})")
     print("  largest tool defs:")
     for d in defs["per_tool"][:8]:
         mark = "  <-- large" if d["tokens"] > PER_TOOL_TOKEN_WARN else ""
