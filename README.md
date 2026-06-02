@@ -2,14 +2,14 @@
 
 # Steam MCP
 
-[![PyPI](https://img.shields.io/pypi/v/steam-mcp)](https://pypi.org/project/steam-mcp/)
+[![PyPI](https://img.shields.io/pypi/v/steam-mcp?cacheSeconds=3600)](https://pypi.org/project/steam-mcp/)
 [![Python](https://img.shields.io/pypi/pyversions/steam-mcp)](https://pypi.org/project/steam-mcp/)
 [![CI](https://github.com/Sarg338/steam-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Sarg338/steam-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![MCP Registry](https://img.shields.io/badge/MCP%20Registry-io.github.Sarg338%2Fsteam--mcp-blue)](https://registry.modelcontextprotocol.io)
 
 A read-only [Model Context Protocol](https://modelcontextprotocol.io) server for the
-public Steam Web API and storefront — **34 tools, 5 prompts, and 2 resources** that let
+public Steam Web API and storefront — **37 tools, 5 prompts, and 2 resources** that let
 any MCP client (Claude Desktop, Claude Code, Cursor, …) answer questions about Steam:
 your friends, games, playtime, and achievements, plus account-independent things like
 sales, reviews, live player counts, discovery, recommendations, and co-op planning.
