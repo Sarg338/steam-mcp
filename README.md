@@ -12,7 +12,8 @@ A read-only [Model Context Protocol](https://modelcontextprotocol.io) server for
 public Steam Web API and storefront — **37 tools, 5 prompts, and 2 resources** that let
 any MCP client (Claude Desktop, Claude Code, Cursor, …) answer questions about Steam:
 your friends, games, playtime, and achievements, plus account-independent things like
-sales, reviews, live player counts, discovery, recommendations, and co-op planning.
+sales, reviews, live player counts, Steam Deck compatibility, discovery,
+recommendations, and co-op planning.
 
 **Read-only · official Steam APIs only · bring your own key · open source.** Nobody logs
 in; the only credential is the free Steam Web API key you set yourself, and the server
@@ -40,30 +41,23 @@ Cursor / Cline / Windsurf and the manual `pip` setup are under [Setup](#setup) b
 ## What it can answer
 
 Account / profile (needs a public profile):
-- "Who's on my Steam friends list, and who's online right now?"
-- "Which of my friends own *Helldivers 2* — and who's playing it right now?"
+- "Who's on my friends list, and who's online right now?"
+- "Which of my friends own *Helldivers 2* — and who's playing it now?"
 - "It's game night — what co-op games do my online friends and I all own?"
-- "What's my most-played game, and how many hours?"
-- "Which achievements am I still missing in Hollow Knight?"
-- "What are my career stats in *Team Fortress 2*?"
-- "What are my rarest achievements in *Hollow Knight*?"
-- "What's my Steam level?" / "Does this account have any VAC bans?"
-- "What's on my wishlist, and is any of it on sale right now?"
-- "Analyze my library — what's my backlog and what have I abandoned?"
-- "Based on what I play most, what new games should I check out?"
+- "Analyze my library — my backlog, and what I loved but abandoned."
+- "Which achievements am I missing in *Hollow Knight*, and which are my rarest?"
+- "What's on my wishlist, and is any of it on sale?"
+- "Based on what I play most, what should I check out next?"
 - "What's in my CS2 inventory, and which items are marketable?"
 
 Account-independent (works for any game, no SteamID needed):
-- "Is *Baldur's Gate 3* any good? What's its review score?"
-- "What's on sale on Steam right now?" / "What are the current top sellers and new releases?"
+- "Is *Baldur's Gate 3* worth buying — and how are its recent reviews trending?"
+- "What's on sale right now, and what are the current top sellers?"
 - "How many people are playing *Counter-Strike 2* this minute?"
-- "What was in the latest *Dota 2* update?"
-- "How much does *Hades II* cost and what genres is it?"
-- "What DLC does *Cities: Skylines* have, and is any of it on sale?"
+- "Will *Hades II* run on my Steam Deck?"
 - "What's the Community Market price of a Field-Tested AK-47 | Redline?"
 - "Is *Elden Ring* a soulslike? What are its community tags?"
-- "Find co-op roguelikes under $20 that are well-reviewed."
-- "Should I buy *Hades II* right now — and how are its recent reviews trending?"
+- "Find well-reviewed co-op roguelikes under $20."
 - "Recommend games like *Hollow Knight* that I don't already own."
 
 ---
@@ -110,13 +104,12 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_get_current_players` | Live concurrent player count | no |
 | `steam_get_app_news` | Recent news / patch notes | no |
 
-Every tool supports `response_format: "markdown"` (default, human-readable) or
-`"json"` (structured), and all are annotated `readOnlyHint: true`. Markdown is the
-compact default — ask for `json` only when you need to parse fields, and prefer the
-composite tools (`steam_should_i_buy`, `steam_recommend`, `steam_discover`,
-`steam_plan_coop_night`) over chaining several calls. Tools that read localized text (`steam_get_app_details`, `steam_search_apps`, `steam_get_app_reviews`,
-`steam_get_player_achievements`, …) accept a `language` parameter — a Steam language
-name like `english`, `french`, `german`, or `schinese` (default `english`).
+Every tool supports `response_format: "markdown"` (default) or `"json"`, and all are
+annotated `readOnlyHint: true`. Prefer the composite tools (`steam_should_i_buy`,
+`steam_recommend`, `steam_discover`, `steam_plan_coop_night`) over chaining several
+calls, and ask for `json` only when you need to parse fields. Tools that read
+localized text accept a `language` parameter — a Steam language name like `french` or
+`schinese` (default `english`).
 
 > \* `steam_discover`, `steam_should_i_buy`, and `steam_recommend` need no key for
 > the store data; their **personalization** (passing a `steamid` to use a user's
