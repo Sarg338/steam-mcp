@@ -497,7 +497,15 @@ async def _resolve_steamid(identifier: str) -> str:
     if m:
         kind, value = m.group(1).lower(), m.group(2)
         if kind == "profiles":
-            return value
+            # A /profiles/ URL must carry a 17-digit SteamID64. Validate before
+            # returning it (it flows into a community URL path downstream), so junk
+            # like "x@host" or path segments can't ride through as a "steamid".
+            if STEAMID64_RE.match(value):
+                return value
+            raise SteamApiError(
+                f"Malformed profile URL: /profiles/ must contain a 17-digit "
+                f"SteamID64, got {value!r}."
+            )
         raw = value  # /id/<vanity> -> resolve the vanity below
 
     # Already a SteamID64?
@@ -3482,10 +3490,19 @@ async def steam_compare_players(params: ComparePlayersInput) -> str:
 # Helpers + library analysis
 # ---------------------------------------------------------------------------
 
+_STRIP_HTML_MAX = 20000  # cap raw input before the O(n^2) tag regexes (ReDoS guard)
+
+
 def _strip_html(s, limit: int = 600):
     """Strip HTML tags/entities to readable plain text, truncated to `limit`."""
     if not s:
         return None
+    # `<[^>]+>` is quadratic on pathological input (a flood of unmatched '<'), and
+    # this runs on upstream Steam descriptions. The output is truncated to `limit`
+    # anyway, so cap the raw input first — 20k chars yields far more than any
+    # realistic `limit` of text, while bounding worst-case work to a constant.
+    if len(s) > _STRIP_HTML_MAX:
+        s = s[:_STRIP_HTML_MAX]
     import html as _html
     s = re.sub(r"<\s*br\s*/?>", " ", s)
     s = re.sub(r"<[^>]+>", " ", s)
@@ -3564,7 +3581,9 @@ def _is_temp_client(name: str) -> bool:
     """Heuristic: does this name look like a non-retail client (beta, playtest,
     demo, trial, test server, staging branch, prototype) rather than a shipped
     game? Name-based and best-effort, tuned to avoid hiding real games."""
-    n = (name or "").strip()
+    # Cap length: _TEMP_SUFFIX_RE is O(n^2) worst-case, and this runs on every
+    # owned-game name. Real Steam app names are well under 200 chars.
+    n = (name or "").strip()[:200]
     return bool(_TEMP_PHRASE_RE.search(n) or _TEMP_SUFFIX_RE.search(n))
 
 
@@ -4811,6 +4830,9 @@ def _parse_cs_attributes(hash_name: str) -> dict:
     (Factory New)'. Rarity/type are NOT in the hash name — those come from the
     item's `type` (e.g. 'Classified Rifle') via the market lookup.
     """
+    # Cap length: `\(([^)]+)\)\s*$` is O(n^2) on a flood of '(' (ReDoS guard). The
+    # markers we read are all at the start/end of a normal-length hash name.
+    hash_name = (hash_name or "")[:300]
     attrs = {"exterior": None, "stattrak": False, "souvenir": False, "star": False}
     m = re.search(r"\(([^)]+)\)\s*$", hash_name)
     if m and m.group(1) in CS_EXTERIORS:

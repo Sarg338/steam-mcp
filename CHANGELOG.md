@@ -3,6 +3,25 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.7]
+
+Hardening from an adversarial (red-team) pass. The audit confirmed no API-key
+leak, SSRF/allowlist bypass, injection, or path-traversal was reachable; the items
+below are the residual robustness findings.
+
+### Security
+- **ReDoS guard: cap input length before three quadratic regexes.** `_strip_html`
+  (`<[^>]+>`), `_parse_cs_attributes` (`\(([^)]+)\)\s*$`), and the temp-client
+  `_TEMP_SUFFIX_RE` are O(n²) on pathological input (e.g. a flood of unmatched `<`
+  or `(`). These run on upstream Steam-controlled text (store descriptions, game
+  names), so a malicious/oversized field could stall the event loop for seconds.
+  Inputs are now length-capped (HTML 20k, CS hash 300, names 200) before the regex,
+  bounding worst-case work to a constant. Normal output is unchanged.
+- **`/profiles/<id>` URLs must carry a valid SteamID64.** `_resolve_steamid` now
+  validates the captured segment against the SteamID64 pattern and rejects junk
+  (e.g. `x@host`) early, instead of passing it downstream into a community URL path
+  (where it was already neutralized by percent-encoding — this closes the door).
+
 ## [1.7.6]
 
 Security hardening from an internal audit. No tool/API changes.
@@ -410,6 +429,7 @@ changes will require a 2.0.
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[1.7.7]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.7
 [1.7.6]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.6
 [1.7.5]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.5
 [1.7.4]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.4

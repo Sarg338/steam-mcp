@@ -739,6 +739,35 @@ def test_handle_error_scrubs_key_from_steamapi_error():
     assert key not in msg and "key=***" in msg
 
 
+def test_redos_inputs_are_bounded():
+    # Inputs are length-capped before the O(n^2) regexes, so pathological strings
+    # finish near-instantly instead of stalling the event loop for seconds.
+    import time as _t
+    cases = [
+        lambda: S._strip_html("<" * 200_000, limit=2000),
+        lambda: S._parse_cs_attributes("(" * 200_000),
+        lambda: S._is_temp_client(("a." * 5000) + " demoX"),
+    ]
+    for fn in cases:
+        t0 = _t.perf_counter()
+        fn()
+        assert _t.perf_counter() - t0 < 2.0
+    # Capping doesn't change normal results.
+    assert S._strip_html("<b>Hi</b> there") == "Hi there"
+    assert S._parse_cs_attributes(
+        "StatTrak™ AK-47 | Redline (Field-Tested)")["exterior"] == "Field-Tested"
+
+
+def test_resolve_profiles_url_requires_steamid64():
+    sid = "76561197960287930"
+    assert run(S._resolve_steamid(
+        f"https://steamcommunity.com/profiles/{sid}")) == sid
+    # A malformed /profiles/ segment is rejected before any network call.
+    with pytest.raises(S.SteamApiError):
+        run(S._resolve_steamid(
+            "https://steamcommunity.com/profiles/x@169.254.169.254"))
+
+
 def test_rate_limiter_bucket(monkeypatch):
     slept = []
 
