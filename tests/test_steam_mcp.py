@@ -179,11 +179,11 @@ def test_discover_basic(monkeypatch):
               20: {"name": "B", "price": "$10", "discount_pct": 50, "on_sale": True},
               30: {"name": "C", "price": "$1", "discount_pct": 0, "on_sale": False}}
 
-    async def fake_app_price(appid, cc):
-        return prices[appid]
+    async def fake_app_prices(appids, cc):
+        return {a: prices[a] for a in appids}
 
     monkeypatch.setattr(S, "_raw_get", fake_raw)
-    monkeypatch.setattr(S, "_app_price", fake_app_price)
+    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
     out = run(S.steam_discover(S.DiscoverInput(term="x", response_format="json")))
     d = json.loads(out)
     assert d["total_count"] == 3 and d["count"] == 3
@@ -202,12 +202,12 @@ def test_discover_explicit_tags(monkeypatch):
         return {"success": 1, "total_count": 1,
                 "results_html": '<a data-ds-appid="5"></a>'}
 
-    async def fake_app_price(appid, cc):
-        return {"name": "G"}
+    async def fake_app_prices(appids, cc):
+        return {a: {"name": "G"} for a in appids}
 
     monkeypatch.setattr(S, "_tag_name_map", fake_map)
     monkeypatch.setattr(S, "_raw_get", fake_raw)
-    monkeypatch.setattr(S, "_app_price", fake_app_price)
+    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
     out = run(S.steam_discover(S.DiscoverInput(
         tags=["Souls-like"], max_price=20, on_sale=True, platform="win",
         response_format="json")))
@@ -245,13 +245,13 @@ def test_discover_personalized(monkeypatch):
 
     prices = {20: {"name": "New A"}, 30: {"name": "New B"}}
 
-    async def fake_app_price(appid, cc):
-        return prices.get(appid, {})
+    async def fake_app_prices(appids, cc):
+        return {a: prices.get(a, {}) for a in appids}
 
     monkeypatch.setattr(S, "_steam_get", fake_steam)
     monkeypatch.setattr(S, "_tag_name_map", fake_map)
     monkeypatch.setattr(S, "_raw_get", fake_raw)
-    monkeypatch.setattr(S, "_app_price", fake_app_price)
+    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
     out = run(S.steam_discover(S.DiscoverInput(
         steamid="76561197960287930", response_format="json")))
     d = json.loads(out)
@@ -332,10 +332,14 @@ def test_recommend_seed(monkeypatch):
     async def fake_app_price(a, cc):
         return {"name": f"G{a}"}
 
+    async def fake_app_prices(appids, cc):
+        return {a: {"name": f"G{a}"} for a in appids}
+
     monkeypatch.setattr(S, "_tag_name_map", fake_map)
     monkeypatch.setattr(S, "_items_tags", fake_items)
     monkeypatch.setattr(S, "_discover_appids", fake_discover)
     monkeypatch.setattr(S, "_app_price", fake_app_price)
+    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
     out = run(S.steam_recommend(S.RecommendInput(seed_appid=100, response_format="json")))
     d = json.loads(out)
     assert d["basis"] == "like G100"
@@ -1253,6 +1257,33 @@ def test_deck_compatibility(monkeypatch):
     assert "No Steam Deck compatibility rating" in msg
 
 
+def test_app_prices_batch_and_fallback(monkeypatch):
+    # GetItems returns 10 (on sale), 11 (free); 12 is absent -> per-item fallback.
+    def _item(aid, name, free=False, final=None, disc=None):
+        bpo = {} if free else {"formatted_final_price": final, "discount_pct": disc}
+        return {"appid": aid, "name": name, "is_free": free,
+                "best_purchase_option": bpo}
+
+    async def fake_steam(path, params, with_key=True, cache_ttl=0):
+        return {"response": {"store_items": [
+            _item(10, "OnSale", final="$5.00", disc=50),
+            _item(11, "FreeGame", free=True),
+        ]}}
+
+    async def fake_app_price(appid, cc):  # fallback path for the missing appid
+        return {"appid": appid, "name": "Fallback", "is_free": False,
+                "price": "$9.99", "discount_pct": 0, "on_sale": False}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(S, "_app_price", fake_app_price)
+
+    pm = run(S._app_prices([10, 11, 12], "us"))
+    assert set(pm) == {10, 11, 12}
+    assert pm[10]["price"] == "$5.00" and pm[10]["on_sale"] and pm[10]["discount_pct"] == 50
+    assert pm[11]["is_free"] and pm[11]["price"] == "Free"
+    assert pm[12]["name"] == "Fallback"   # came from the single-item fallback
+
+
 def test_wishlist_on_sale_filter(monkeypatch):
     async def fake_steam(path, params, **k):
         return {"response": {"items": [{"appid": 10, "priority": 0},
@@ -1263,11 +1294,11 @@ def test_wishlist_on_sale_filter(monkeypatch):
         11: {"appid": 11, "name": "Full", "price": "$20", "discount_pct": 0, "on_sale": False},
     }
 
-    async def fake_app_price(appid, cc):
-        return prices[appid]
+    async def fake_app_prices(appids, cc):
+        return {a: prices[a] for a in appids}
 
     monkeypatch.setattr(S, "_steam_get", fake_steam)
-    monkeypatch.setattr(S, "_app_price", fake_app_price)
+    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
     out = run(S.steam_get_wishlist(
         S.WishlistInput(steamid="76561197960287930", on_sale_only=True,
                         response_format="json")))
@@ -1404,11 +1435,11 @@ def test_get_dlc(monkeypatch):
               "discount_pct": 50, "on_sale": True},
     }
 
-    async def fake_app_price(appid, cc):
-        return prices[appid]
+    async def fake_app_prices(appids, cc):
+        return {a: prices[a] for a in appids}
 
     monkeypatch.setattr(S, "_store_get", fake_store)
-    monkeypatch.setattr(S, "_app_price", fake_app_price)
+    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
 
     out = run(S.steam_get_dlc(S.DlcInput(appid=100, response_format="json")))
     d = json.loads(out)

@@ -10,8 +10,10 @@ venv/
 .mypy_cache/
 .ruff_cache/
 
-# Agent working notes — local only, not for the public repo
+# Local-only working docs (not tracked). The tracked, condensed changelog is
+# CHANGES.md; CHANGELOG.md is kept locally as the detailed/internal archive.
 CLAUDE.md
+CHANGELOG.md
 
 # Cygwin/MSYS crash dumps (build/runtime cruft)
 *.stackdump

@@ -1,6 +1,6 @@
 [project]
 name = "steam-mcp"
-version = "1.8.0"
+version = "1.8.1"
 description = "Read-only Steam MCP server (bring-your-own-key) for friends, games, playtime, achievements, sales, reviews, and live player counts."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -62,7 +62,7 @@ include = [
     "/steam_mcp",
     "/tests",
     "/README.md",
-    "/CHANGELOG.md",
+    "/CHANGES.md",
     "/LICENSE",
     "/PRIVACY.md",
     "/SECURITY.md",

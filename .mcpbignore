@@ -33,8 +33,10 @@ _pack_only.bat
 .pytest_cache/
 PUBLISHING.md
 
-# Internal working notes — not for the distributed bundle
+# Internal working notes — not for the distributed bundle (CHANGES.md is the
+# tracked, condensed changelog that ships instead of the detailed CHANGELOG.md)
 CLAUDE.md
+CHANGELOG.md
 
 # Tests are not needed in the runtime bundle
 tests/

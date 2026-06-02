@@ -2224,9 +2224,8 @@ async def steam_get_dlc(params: DlcInput) -> str:
         total = len(dlc_ids)
         page_ids = dlc_ids[: params.limit]
         if params.enrich:
-            infos = await _gather_limited(
-                [_app_price(i, params.country_code) for i in page_ids]
-            )
+            pm = await _app_prices(page_ids, params.country_code)
+            infos = [pm.get(i) for i in page_ids]
         else:
             infos = [None] * len(page_ids)
 
@@ -2669,7 +2668,8 @@ async def steam_discover(params: DiscoverInput) -> str:
         appids, total = await _discover_appids(query)
         appids = [a for a in appids if a not in owned_ids]
         page = appids[: params.limit]
-        infos = await _gather_limited([_app_price(a, cc) for a in page]) if page else []
+        pm = await _app_prices(page, cc) if page else {}
+        infos = [pm.get(a, {}) for a in page]
         rows = []
         for a, info in zip(page, infos, strict=True):
             rows.append({
@@ -2971,7 +2971,8 @@ async def _app_price(appid: int, cc: str) -> dict:
         )
         entry = data.get(str(appid), {})
         if not entry.get("success"):
-            return {"appid": appid, "name": None, "on_sale": False, "discount_pct": 0}
+            return {"appid": appid, "name": None, "price": None, "is_free": False,
+                "on_sale": False, "discount_pct": 0}
         d = entry.get("data", {})
         price = d.get("price_overview") or {}
         is_free = d.get("is_free", False)
@@ -2985,7 +2986,62 @@ async def _app_price(appid: int, cc: str) -> dict:
             "on_sale": disc > 0,
         }
     except Exception:  # noqa: BLE001
-        return {"appid": appid, "name": None, "on_sale": False, "discount_pct": 0}
+        return {"appid": appid, "name": None, "price": None, "is_free": False,
+                "on_sale": False, "discount_pct": 0}
+
+
+async def _app_prices(appids: list[int], cc: str = "us") -> dict[int, dict]:
+    """Batched name + price/discount for many appids — ONE GetItems call per ~50,
+    vs N appdetails calls. Same per-appid shape as `_app_price`, returned as a
+    {appid: info} map. GetItems runs on the roomier Web API host (no key) and
+    returns a preformatted price; any appid it can't price (bundle/region-locked/
+    delisted) falls back to a single `_app_price` so callers still get a result.
+    """
+    ids = [a for a in dict.fromkeys(appids) if a]  # dedupe, drop falsy, keep order
+    if not ids:
+        return {}
+    out: dict[int, dict] = {}
+
+    async def _chunk(chunk: list[int]) -> dict:
+        body = {
+            "ids": [{"appid": a} for a in chunk],
+            "context": {"language": "english", "country_code": cc.upper(),
+                        "steam_realm": 1},
+            "data_request": {"include_basic_info": True,
+                             "include_all_purchase_options": True},
+        }
+        data = await _steam_get(
+            "IStoreBrowseService/GetItems/v1/",
+            {"input_json": json.dumps(body, separators=(",", ":"))},
+            with_key=False, cache_ttl=CACHE_TTL_APPDETAILS,
+        )
+        res: dict[int, dict] = {}
+        for it in (data.get("response") or {}).get("store_items", []) or []:
+            aid = it.get("appid")
+            if not aid:
+                continue
+            is_free = bool(it.get("is_free"))
+            bpo = it.get("best_purchase_option") or {}
+            disc = bpo.get("discount_pct") or 0
+            price = bpo.get("formatted_final_price") or ("Free" if is_free else None)
+            res[aid] = {
+                "appid": aid, "name": it.get("name"), "is_free": is_free,
+                "price": price, "discount_pct": disc, "on_sale": disc > 0,
+            }
+        return res
+
+    chunks = [ids[i:i + 50] for i in range(0, len(ids), 50)]
+    for part in await _gather_limited([_chunk(c) for c in chunks]):
+        if part:
+            out.update(part)
+
+    # Fallback for appids GetItems didn't price (absent, or paid with no price).
+    missing = [a for a in ids
+               if a not in out or (not out[a]["price"] and not out[a]["is_free"])]
+    if missing:
+        fills = await _gather_limited([_app_price(a, cc) for a in missing])
+        out.update({p["appid"]: p for p in fills})
+    return out
 
 
 @mcp.tool(
@@ -3147,9 +3203,9 @@ async def steam_get_wishlist(params: WishlistInput) -> str:
         page = items[: params.limit]
 
         if params.enrich:
-            infos = await _gather_limited(
-                [_app_price(it.get("appid"), params.country_code) for it in page]
-            )
+            pm = await _app_prices([it.get("appid") for it in page],
+                                   params.country_code)
+            infos = [pm.get(it.get("appid")) for it in page]
         else:
             infos = [None] * len(page)
 
@@ -4277,7 +4333,8 @@ async def steam_recommend(params: RecommendInput) -> str:
             scored.append((a, shared))
         scored.sort(key=lambda x: len(x[1]), reverse=True)  # stable: review rank on ties
         page = scored[: params.limit]
-        infos = await _gather_limited([_app_price(a, cc) for a, _ in page])
+        pm = await _app_prices([a for a, _ in page], cc)
+        infos = [pm.get(a, {}) for a, _ in page]
         rows = []
         for (a, shared), info in zip(page, infos, strict=True):
             rows.append({
