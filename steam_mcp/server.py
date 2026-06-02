@@ -260,6 +260,7 @@ def _http_client() -> httpx.AsyncClient:
             timeout=HTTP_TIMEOUT,
             follow_redirects=True,
             headers={"Accept": "application/json"},
+            event_hooks={"request": [_enforce_host]},
         )
         _CLIENT_LOOP = loop
     return _CLIENT
@@ -270,6 +271,17 @@ def _check_host(url: str) -> None:
     host = (urlsplit(url).hostname or "").lower()
     if host not in ALLOWED_HOSTS:
         raise SteamApiError(f"Refusing request to non-Steam host: {host or url!r}")
+
+
+async def _enforce_host(request: httpx.Request) -> None:
+    """httpx request hook: enforce the allowlist on EVERY hop, including redirects.
+
+    The client follows redirects, so a pre-flight `_check_host` on the initial URL
+    alone would miss a 3xx that leaves the allowlist (e.g. to an internal/metadata
+    host). This fires before each hop is sent. `_check_host` keys only on the host,
+    so the key in `request.url`'s query string is never surfaced in the error.
+    """
+    _check_host(str(request.url))
 
 
 class _Bucket:
@@ -442,7 +454,7 @@ def _scrub(text: str) -> str:
 def _handle_error(e: Exception) -> str:
     """Consistent, actionable error formatting across all tools."""
     if isinstance(e, SteamApiError):
-        return f"Error: {e}"
+        return _scrub(f"Error: {e}")
     if isinstance(e, httpx.HTTPStatusError):
         code = e.response.status_code
         if code == 401 or code == 403:

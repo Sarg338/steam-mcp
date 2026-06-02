@@ -3,6 +3,23 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.6]
+
+Security hardening from an internal audit. No tool/API changes.
+
+### Security
+- **SSRF allowlist now enforced on every redirect hop, not just the first URL.**
+  The HTTP client follows redirects, so a pre-flight `_check_host` on the initial
+  URL alone could be bypassed by a 3xx that left the allowlist (e.g. to a
+  cloud-metadata or internal host). A request `event_hook` (`_enforce_host`) now
+  re-checks the host allowlist before every hop, including redirects. (Practical
+  risk was low — it requires Steam itself to redirect off-domain — but the
+  allowlist is a documented control and should hold per-hop.)
+- **API key scrubbing now also covers `SteamApiError` messages.** `_handle_error`
+  ran `_scrub` only on the generic-exception branch; it now scrubs the
+  `SteamApiError` branch too, so any future error string that includes a request
+  URL can't surface the `?key=` value. (No current message contained it.)
+
 ## [1.7.5]
 
 ### Fixed
@@ -393,6 +410,7 @@ changes will require a 2.0.
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[1.7.6]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.6
 [1.7.5]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.5
 [1.7.4]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.4
 [1.7.3]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.3

@@ -723,6 +723,22 @@ def test_scrub_api_key():
     assert key not in out and "key=***" in out
 
 
+def test_enforce_host_hook_blocks_redirect_target():
+    # The client follows redirects, so the allowlist must be enforced per-hop.
+    run(S._enforce_host(S.httpx.Request(
+        "GET", "https://api.steampowered.com/x?key=secret")))  # allowed: no raise
+    for bad in ("http://169.254.169.254/latest/meta-data",  # cloud metadata
+                "https://evil.example.com/"):
+        with pytest.raises(S.SteamApiError):
+            run(S._enforce_host(S.httpx.Request("GET", bad)))
+
+
+def test_handle_error_scrubs_key_from_steamapi_error():
+    key = "0123456789abcdef0123456789abcdef"
+    msg = S._handle_error(S.SteamApiError(f"boom key={key} happened"))
+    assert key not in msg and "key=***" in msg
+
+
 def test_rate_limiter_bucket(monkeypatch):
     slept = []
 
