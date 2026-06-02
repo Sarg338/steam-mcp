@@ -11,7 +11,7 @@ description: >-
 
 # Steam
 
-Drives the `steam-mcp` server (read-only Steam Web API + storefront): 36 tools,
+Drives the `steam-mcp` server (read-only Steam Web API + storefront): 37 tools,
 plus 5 prompts and 2 resources.
 
 ## Token-efficient usage

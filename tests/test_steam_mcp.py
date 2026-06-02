@@ -1196,7 +1196,11 @@ def test_app_details_features(monkeypatch):
     async def fake_store(path, params, cache_ttl=0):
         return data
 
+    async def fake_deck(appid, language="english"):
+        return {"category": 3, "label": "Verified", "items": [], "blog_url": None}
+
     monkeypatch.setattr(S, "_store_get", fake_store)
+    monkeypatch.setattr(S, "_deck_compat", fake_deck)  # hermetic + assert below
     out = run(S.steam_get_app_details(
         S.AppDetailsInput(appid=123, response_format="json")))
     d = json.loads(out)
@@ -1206,6 +1210,47 @@ def test_app_details_features(monkeypatch):
     assert d["dlc_count"] == 2
     assert d["full_audio_languages"] == ["English"]
     assert d["pc_requirements"]["minimum"] == "8GB RAM"   # label stripped
+    assert d["steam_deck"] == "Verified"                  # inline Deck enrichment
+
+
+def test_deck_compatibility(monkeypatch):
+    report = {"success": 1, "results": {
+        "appid": 730, "resolved_category": 2,  # 2 = Playable
+        "resolved_items": [
+            {"display_type": 3,  # caveat
+             "loc_token": "#SteamDeckVerified_TestResult_ControllerGlyphsDoNotMatchDeckDevice"},
+            {"display_type": 4,  # pass
+             "loc_token": "#SteamDeckVerified_TestResult_DefaultConfigurationIsPerformant"},
+        ],
+        "steam_deck_blog_url": "",
+    }}
+
+    async def fake_raw(url, params, cache_ttl=0):
+        return report
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+
+    # Helper: category mapping + loc_token humanization + glyphs.
+    d = run(S._deck_compat(730))
+    assert d["category"] == 2 and d["label"] == "Playable"
+    assert d["items"][0]["status"] == "⚠"  # caveat
+    assert d["items"][0]["text"] == "Controller Glyphs Do Not Match Deck Device"
+    assert d["items"][1]["status"] == "✓"  # pass
+
+    # Tool: markdown + json.
+    md = run(S.steam_get_deck_compatibility(S.DeckCompatInput(appid=730)))
+    assert "# Steam Deck: Playable" in md
+    assert "Controller Glyphs Do Not Match Deck Device" in md
+    j = json.loads(run(S.steam_get_deck_compatibility(
+        S.DeckCompatInput(appid=730, response_format="json"))))
+    assert j["appid"] == 730 and j["label"] == "Playable"
+
+    # No published rating -> friendly message, not an error.
+    async def fake_none(url, params, cache_ttl=0):
+        return {"success": 0}
+    monkeypatch.setattr(S, "_raw_get", fake_none)
+    msg = run(S.steam_get_deck_compatibility(S.DeckCompatInput(appid=1)))
+    assert "No Steam Deck compatibility rating" in msg
 
 
 def test_wishlist_on_sale_filter(monkeypatch):

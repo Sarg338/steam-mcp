@@ -92,7 +92,8 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_discover` | **Find/recommend games** by tag, price, sale, platform — optionally **personalized** to a user's taste (excludes games they own) | no* |
 | `steam_should_i_buy` | **Buying brief** — price, lifetime + recent reviews (trend), tags, Metacritic, and your taste match | no* |
 | `steam_recommend` | **Recommend games** like a seed game or your taste, with the shared tags as the "why" | no* |
-| `steam_get_app_details` | **Full store details** — play modes/co-op, controller, DLC, languages, requirements, Metacritic | no |
+| `steam_get_app_details` | **Full store details** — play modes/co-op, controller, DLC, languages, requirements, Metacritic, Steam Deck | no |
+| `steam_get_deck_compatibility` | **Steam Deck rating** (Verified/Playable/Unsupported) + the per-criterion test results | no |
 | `steam_get_dlc` | **A game's DLC**, with live prices and what's on sale | no |
 | `steam_get_app_regional_pricing` | A game's price **across regions** (each in local currency) | no |
 | `steam_get_workshop_item` | **Workshop item** metadata (game, tags, subscribers, favorites, views) | no |

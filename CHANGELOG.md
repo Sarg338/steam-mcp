@@ -3,6 +3,20 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.0]
+
+### Added
+- **Steam Deck compatibility** — new tool **`steam_get_deck_compatibility`** returns
+  Valve's official Deck rating (Verified / Playable / Unsupported / Unknown) plus the
+  per-criterion test results (default controller config, interface text legibility,
+  default performance, …), each marked pass (✓) or caveat (⚠). No API key required.
+  Sourced from the storefront's `ajaxgetdeckappcompatibilityreport` (cached 24h).
+- **`steam_get_app_details` now includes the Deck rating inline** (a `steam_deck`
+  field in JSON, a "Steam Deck" line in Markdown), fetched concurrently with the
+  store details and best-effort (a Deck-lookup failure never breaks app details).
+
+That brings the surface to **37 tools**. Additive — backward-compatible.
+
 ## [1.7.7]
 
 Hardening from an adversarial (red-team) pass. The audit confirmed no API-key
@@ -429,6 +443,7 @@ changes will require a 2.0.
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[1.8.0]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.8.0
 [1.7.7]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.7
 [1.7.6]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.6
 [1.7.5]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.5

@@ -140,6 +140,13 @@ CACHE_TTL_REVIEWS = 300         # lifetime review summary (5 min)
 CACHE_TTL_WORKSHOP = 3600       # workshop item metadata (slow-changing)
 CACHE_TTL_GROUP = 3600          # group name / url / member count (slow-changing)
 CACHE_TTL_MARKET = 600          # market price (10 min — also eases the tight rate limit)
+CACHE_TTL_DECK = 86400          # Steam Deck compatibility rating (effectively static)
+
+# Steam Deck compatibility (storefront `ajaxgetdeckappcompatibilityreport`):
+# resolved_category -> label; resolved_items[].display_type -> a glyph.
+DECK_COMPAT_URL = "https://store.steampowered.com/saleaction/ajaxgetdeckappcompatibilityreport"
+DECK_CATEGORIES = {0: "Unknown", 1: "Unsupported", 2: "Playable", 3: "Verified"}
+DECK_ITEM_STATUS = {2: "✗", 3: "⚠", 4: "✓"}
 
 # CS2/CSGO item wear tiers, as they appear in a market_hash_name's trailing (…).
 CS_EXTERIORS = (
@@ -402,6 +409,41 @@ async def _raw_get(url: str, params: dict[str, Any], cache_ttl: float = 0) -> An
     if ck is not None:
         _CACHE.set(ck, data, cache_ttl)
     return data
+
+
+async def _deck_compat(appid: int, language: str = "english") -> Optional[dict]:
+    """Steam Deck compatibility report for an app (no key, cached 24h).
+
+    Returns {category, label, items:[{status, text}], blog_url} or None if the app
+    has no published rating. `resolved_category` 0/1/2/3 = Unknown/Unsupported/
+    Playable/Verified; `resolved_items` carry a loc_token (no localized string, so
+    we humanize the CamelCase) and a display_type glyph. Verified live 2026-06.
+    """
+    data = await _raw_get(
+        DECK_COMPAT_URL, {"nAppID": appid, "l": language}, cache_ttl=CACHE_TTL_DECK
+    )
+    if not isinstance(data, dict) or not data.get("success"):
+        return None
+    res = data.get("results") or {}
+    cat = res.get("resolved_category")
+    if cat is None:
+        return None
+    items = []
+    for it in res.get("resolved_items") or []:
+        token = (it.get("loc_token") or "")[:200].replace(
+            "#SteamDeckVerified_TestResult_", ""
+        )
+        text = re.sub(r"(?<!^)(?=[A-Z])", " ", token).strip()
+        items.append({
+            "status": DECK_ITEM_STATUS.get(it.get("display_type"), "•"),
+            "text": text,
+        })
+    return {
+        "category": cat,
+        "label": DECK_CATEGORIES.get(cat, "Unknown"),
+        "items": items,
+        "blog_url": res.get("steam_deck_blog_url") or None,
+    }
 
 
 async def _raw_get_text(url: str, params: dict[str, Any] | None = None,
@@ -692,6 +734,57 @@ class PlayersInput(BaseModel):
         max_length=100,
     )
     response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+class DeckCompatInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    appid: int = Field(..., description="Steam application (game) ID.", ge=1)
+    language: str = Field(
+        default="english", max_length=32,
+        description="Steam language name for the report (the category label is "
+        "normalized to English regardless).",
+    )
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+@mcp.tool(
+    name="steam_get_deck_compatibility",
+    annotations={
+        "title": "Steam Deck Compatibility",
+        "readOnlyHint": True, "destructiveHint": False,
+        "idempotentHint": True, "openWorldHint": True,
+    },
+)
+async def steam_get_deck_compatibility(params: DeckCompatInput) -> str:
+    """Steam Deck rating for a game: Verified, Playable, Unsupported, or Unknown.
+
+    Answers "can I play this on my Steam Deck" and "why is it only Playable" —
+    returns Valve's official Deck compatibility category plus the per-criterion test
+    results (default controller config, interface text legibility, default
+    performance, etc.), each marked pass (✓) or caveat (⚠). No API key required.
+
+    Args:
+        params (DeckCompatInput): appid, language, response_format.
+
+    Returns:
+        str: Markdown or JSON — the category and the list of Deck test-result notes.
+    """
+    try:
+        deck = await _deck_compat(params.appid, params.language)
+        if not deck:
+            return (f"No Steam Deck compatibility rating published for appid "
+                    f"{params.appid} (untested, or not a game).")
+        if params.response_format == ResponseFormat.JSON:
+            return _dump({"appid": params.appid, **deck})
+        lines = [f"# Steam Deck: {deck['label']} (appid {params.appid})"]
+        for it in deck["items"]:
+            lines.append(f"- {it['status']} {it['text']}")
+        if deck["blog_url"]:
+            lines.append(f"\nDeveloper notes: {deck['blog_url']}")
+        return "\n".join(lines)
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
 
 
 class AppDetailsInput(BaseModel):
@@ -1894,11 +1987,22 @@ async def steam_get_app_details(params: AppDetailsInput) -> str:
         str: Markdown or JSON containing all of the above.
     """
     try:
-        data = await _store_get(
-            "appdetails",
-            {"appids": params.appid, "cc": params.country_code, "l": params.language},
-            cache_ttl=CACHE_TTL_APPDETAILS,
+        # Fetch the Deck rating concurrently (best-effort: failure must not break
+        # app details). Both are cached, so repeat calls are free.
+        data, deck = await asyncio.gather(
+            _store_get(
+                "appdetails",
+                {"appids": params.appid, "cc": params.country_code,
+                 "l": params.language},
+                cache_ttl=CACHE_TTL_APPDETAILS,
+            ),
+            _deck_compat(params.appid, params.language),
+            return_exceptions=True,
         )
+        if isinstance(data, BaseException):
+            raise data
+        if isinstance(deck, BaseException):
+            deck = None
         entry = data.get(str(params.appid), {})
         if not entry.get("success"):
             return f"No store details found for app {params.appid}."
@@ -1956,6 +2060,7 @@ async def steam_get_app_details(params: AppDetailsInput) -> str:
             "categories": cats,
             "features": features,
             "controller_support": d.get("controller_support"),
+            "steam_deck": (deck or {}).get("label"),
             "platforms": platforms,
             "metacritic": (d.get("metacritic") or {}).get("score"),
             "metacritic_url": (d.get("metacritic") or {}).get("url"),
@@ -2007,6 +2112,8 @@ async def steam_get_app_details(params: AppDetailsInput) -> str:
             f"- **Play modes**: {', '.join(modes) or 'n/a'}",
             f"- **Controller**: {summary['controller_support'] or 'none'}",
         ]
+        if summary["steam_deck"]:
+            lines.append(f"- **Steam Deck**: {summary['steam_deck']}")
         if summary["metacritic"]:
             lines.append(f"- **Metacritic**: {summary['metacritic']}")
         if summary["recommendations_total"]:
