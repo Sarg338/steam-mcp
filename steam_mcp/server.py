@@ -4472,8 +4472,15 @@ class PlanCoopNightInput(BaseModel):
     )
     friends: list[str] = Field(
         default_factory=list, max_length=50,
-        description="Optional explicit group (SteamID64s / vanity names). If omitted, "
-        "uses the host's friends (online ones by default).",
+        description="Optional explicit group (SteamID64s / vanity names) — pass this "
+        "to plan with specific people. If omitted, uses the host's friends (online "
+        "ones by default).",
+    )
+    mode: str = Field(
+        default="owned",
+        description="'owned' (default): co-op games the host + friends already SHARE, "
+        "ranked by how many own each. 'new': well-reviewed co-op games NONE of the "
+        "group owns yet — fresh picks to buy and play together.",
     )
     online_only: bool = Field(
         default=True,
@@ -4493,6 +4500,14 @@ class PlanCoopNightInput(BaseModel):
     country_code: str = Field(default="us", min_length=2, max_length=2)
     response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
 
+    @field_validator("mode")
+    @classmethod
+    def _check_mode(cls, v: str) -> str:
+        v = v.lower().strip()
+        if v not in {"owned", "new"}:
+            raise ValueError("mode must be 'owned' or 'new'")
+        return v
+
 
 @mcp.tool(
     name="steam_plan_coop_night",
@@ -4505,21 +4520,23 @@ class PlanCoopNightInput(BaseModel):
 async def steam_plan_coop_night(params: PlanCoopNightInput) -> str:
     """Find co-op games the host and their friends all own — for game night.
 
-    Cross-references the host's library with friends' libraries, keeps games that
-    support co-op, and ranks them by how many of the group own each. By default the
-    group is the host's friends who are ONLINE right now (the "tonight" framing);
-    pass an explicit `friends` list to plan with specific people, or
-    online_only=false for everyone. Requires the host's friend list + Game Details
-    Public, and each friend's Game Details Public (private ones are skipped and
-    counted). Needs an API key.
+    Two modes. mode='owned' (default) cross-references the host's library with
+    friends' libraries, keeps co-op games, and ranks by how many of the group own
+    each. mode='new' instead recommends well-reviewed co-op games that NONE of the
+    group owns yet — fresh picks to buy and play together (it excludes every readable
+    library in the group). By default the group is the host's friends who are ONLINE
+    right now (the "tonight" framing); pass an explicit `friends` list to plan with
+    specific people, or online_only=false for everyone. 'owned' needs the host's
+    Game Details Public; both need the friend list Public when the group is derived.
+    Needs an API key.
 
     Args:
-        params (PlanCoopNightInput): steamid (host), friends, online_only,
+        params (PlanCoopNightInput): steamid (host), friends, mode, online_only,
             max_friends, min_friends_owning, limit, country_code.
 
     Returns:
-        str: Markdown or JSON. the group (+ who's online), how many libraries were
-        checked, and co-op games ranked by how many of the group own each.
+        str: Markdown or JSON. the group (+ who's online), and either co-op games the
+        group shares (ranked by owners) or — in mode='new' — fresh co-op games to buy.
     """
     try:
         host = await _resolve_steamid(params.steamid)
@@ -4557,19 +4574,87 @@ async def steam_plan_coop_night(params: PlanCoopNightInput) -> str:
             derived = True
 
         host_owned = await _owned_set(host)
+        member_sets = await _gather_limited([_owned_set(g) for g in group])
+        private = sum(1 for s in member_sets if s is None)
+        checked = [g for g, s in zip(group, member_sets, strict=True) if s is not None]
+        online_names = [summaries.get(g, {}).get("personaname", "Unknown")
+                        for g in checked if _is_online(summaries.get(g, {}))]
+        if derived:
+            grp_desc = (f"your {len(group)} online friends" if params.online_only
+                        else f"{len(group)} friends")
+        else:
+            grp_desc = ", ".join(summaries.get(g, {}).get("personaname", g)
+                                 for g in checked) or "your group"
+        header = [
+            f"# Co-op night for {host}",
+            f"Group: {grp_desc}."
+            + (f" Online now: {', '.join(online_names)}." if online_names else ""),
+        ]
+
+        # --- "new" mode: well-reviewed co-op games NONE of the group owns yet ---
+        if params.mode == "new":
+            cc = params.country_code
+            owned_union = set(host_owned or ())
+            for s in member_sets:
+                if s:
+                    owned_union |= s
+            coop_tag_ids, _ = await _resolve_tag_ids(["Co-op"])
+            query = {"json": 1, "infinite": 1, "cc": cc, "l": "english",
+                     "category1": 998, "start": 0, "count": 100,
+                     "sort_by": "Reviews_DESC"}
+            if coop_tag_ids:
+                query["tags"] = ",".join(str(t) for t in coop_tag_ids)
+            found, _ = await _discover_appids(query)
+            fresh = [a for a in found if a not in owned_union][:60]
+            coop_info = await _items_coop(fresh)
+            picks = []
+            for a in fresh:
+                ci = coop_info.get(a)
+                if (ci and ci.get("coop")
+                        and not _is_temp_client(ci.get("name") or "")):
+                    picks.append(a)
+                if len(picks) >= params.limit:
+                    break
+            pm = await _app_prices(picks, cc) if picks else {}
+            rows = [{
+                "appid": a,
+                "name": (pm.get(a, {}).get("name")
+                         or (coop_info.get(a) or {}).get("name") or f"app {a}"),
+                "price": pm.get(a, {}).get("price"),
+                "on_sale": pm.get(a, {}).get("on_sale", False),
+                "discount_pct": pm.get(a, {}).get("discount_pct", 0),
+            } for a in picks]
+            libs = len(checked) + (1 if host_owned is not None else 0)
+            if params.response_format == ResponseFormat.JSON:
+                return _dump({
+                    "host": host, "mode": "new", "group_size": len(group),
+                    "checked": len(checked), "private_or_unknown": private,
+                    "online_now": online_names, "excluded_owned": len(owned_union),
+                    "count": len(rows), "games": rows,
+                })
+            lines = header + [
+                f"Fresh co-op picks — none of the {libs} readable "
+                f"{'library' if libs == 1 else 'libraries'} own these:",
+                "",
+            ]
+            if rows:
+                for r in rows:
+                    sale = f" (-{r['discount_pct']}%)" if r["on_sale"] else ""
+                    lines.append(f"- **{r['name']}** (appid {r['appid']}) — "
+                                 f"{r['price'] or 'price n/a'}{sale}")
+            else:
+                lines.append("Couldn't find fresh co-op games right now — try again, "
+                             "or widen the group.")
+            return "\n".join(lines)
+
+        # --- "owned" mode (default): co-op games the group already shares ---
         if host_owned is None:
             return ("Can't plan — the host's Game details aren't public. "
                     + _privacy_hint("Game details"))
-
-        member_sets = await _gather_limited([_owned_set(g) for g in group])
         owners_by_app: dict = {}
-        private = 0
-        checked = []
         for g, s in zip(group, member_sets, strict=True):
             if s is None:
-                private += 1
                 continue
-            checked.append(g)
             for a in (s & host_owned):
                 owners_by_app.setdefault(a, []).append(g)
 
@@ -4577,7 +4662,8 @@ async def steam_plan_coop_night(params: PlanCoopNightInput) -> str:
                       if len(owners) >= params.min_friends_owning]
         if not candidates:
             return ("No shared games among the host and the selected friends "
-                    "(with public libraries). Try more friends or online_only=false.")
+                    "(with public libraries). Try more friends, online_only=false, "
+                    "or mode='new' to find games none of you own yet.")
         candidates.sort(key=lambda x: len(x[1]), reverse=True)
         coop_info = await _items_coop([a for a, _ in candidates[:150]])
 
@@ -4597,30 +4683,13 @@ async def steam_plan_coop_night(params: PlanCoopNightInput) -> str:
             if len(rows) >= params.limit:
                 break
 
-        online_names = [summaries.get(g, {}).get("personaname", "Unknown")
-                        for g in checked if _is_online(summaries.get(g, {}))]
-
         if params.response_format == ResponseFormat.JSON:
             return _dump({
-                "host": host,
-                "group_size": len(group),
-                "checked": len(checked),
-                "private_or_unknown": private,
-                "online_now": online_names,
-                "count": len(rows),
-                "games": rows,
+                "host": host, "mode": "owned", "group_size": len(group),
+                "checked": len(checked), "private_or_unknown": private,
+                "online_now": online_names, "count": len(rows), "games": rows,
             })
-
-        if derived:
-            grp_desc = (f"your {len(group)} online friends" if params.online_only
-                        else f"{len(group)} friends")
-        else:
-            grp_desc = ", ".join(summaries.get(g, {}).get("personaname", g)
-                                 for g in checked) or "your group"
-        lines = [
-            f"# Co-op night for {host}",
-            f"Group: {grp_desc}."
-            + (f" Online now: {', '.join(online_names)}." if online_names else ""),
+        lines = header + [
             f"Checked {len(checked)} libraries ({private} private/unknown).",
             "",
         ]

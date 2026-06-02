@@ -75,7 +75,7 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_get_friend_list` | Friends enriched with name + live status | yes |
 | `steam_find_friends_who_own` | **Which friends own (or are playing) a game** — "who can I play X with" | yes |
 | `steam_get_user_groups` | The Steam groups/clans a user is in (name, URL, member count) | yes |
-| `steam_plan_coop_night` | **Co-op games the host + friends all own**, ranked by owners, with who's online now | yes |
+| `steam_plan_coop_night` | **Co-op games the host + friends all own** (ranked by owners) — or `mode="new"` for **fresh co-op games none of them own yet**; with who's online now | yes |
 | `steam_get_owned_games` | Owned games with total/recent hours (sortable) | yes |
 | `steam_analyze_library` | **Backlog, playtime distribution, abandoned games** across a whole library | yes |
 | `steam_get_recently_played_games` | Last-2-weeks playtime | yes |

@@ -1185,6 +1185,51 @@ def test_coop_night_excludes_temp_clients(monkeypatch):
     names = {g["name"] for g in d["games"]}
     assert "Real Coop Game" in names
     assert "Some Game Playtest" not in names  # unlaunchable playtest skipped
+    assert d["mode"] == "owned"
+
+
+def test_coop_night_new_mode(monkeypatch):
+    host = "76561197960287930"
+    friend = "76561197960287931"
+    owned = {host: {100}, friend: {200}}     # union {100, 200} must be excluded
+
+    async def fake_summaries(ids):
+        return {i: {"personaname": "Pal", "personastate": 1} for i in ids}
+
+    async def fake_owned_set(sid):
+        return owned.get(sid, set())
+
+    async def fake_resolve_tags(names):
+        return ([1685], [])                  # "Co-op" -> tag id
+
+    async def fake_discover(query):
+        assert query.get("sort_by") == "Reviews_DESC"   # 'new' ranks by reviews
+        return [100, 300, 200, 400, 500], 5  # 100/200 owned; 500 isn't co-op
+
+    async def fake_items_coop(appids):
+        meta = {300: ("Fresh Co-op A", True), 400: ("Fresh Co-op B", True),
+                500: ("Solo Only", False)}
+        return {a: {"name": meta.get(a, ("?", False))[0],
+                    "coop": meta.get(a, ("?", False))[1]} for a in appids}
+
+    async def fake_app_prices(appids, cc):
+        nm = {300: "Fresh Co-op A", 400: "Fresh Co-op B"}
+        return {a: {"name": nm.get(a), "price": "$19.99",
+                    "on_sale": False, "discount_pct": 0} for a in appids}
+
+    monkeypatch.setattr(S, "_summaries_for", fake_summaries)
+    monkeypatch.setattr(S, "_owned_set", fake_owned_set)
+    monkeypatch.setattr(S, "_resolve_tag_ids", fake_resolve_tags)
+    monkeypatch.setattr(S, "_discover_appids", fake_discover)
+    monkeypatch.setattr(S, "_items_coop", fake_items_coop)
+    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
+
+    d = json.loads(run(S.steam_plan_coop_night(S.PlanCoopNightInput(
+        steamid=host, friends=[friend], mode="new", response_format="json"))))
+    assert d["mode"] == "new"
+    assert [g["appid"] for g in d["games"]] == [300, 400]  # owned excluded, non-coop dropped
+    assert d["excluded_owned"] == 2                        # union of {100} and {200}
+    assert {g["name"] for g in d["games"]} == {"Fresh Co-op A", "Fresh Co-op B"}
 
 
 def test_app_details_features(monkeypatch):

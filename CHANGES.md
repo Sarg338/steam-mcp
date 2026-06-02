@@ -4,6 +4,9 @@ A concise, one-line-per-change history. Versions follow
 [Semantic Versioning](https://semver.org/). Releases:
 <https://github.com/Sarg338/steam-mcp/releases>
 
+## [1.10.0]
+- `steam_plan_coop_night` gains `mode="new"` — recommend well-reviewed co-op games that NONE of the group owns yet (fresh picks to buy together), vs the default `mode="owned"` (games you already share). (Filtering which friends to include already works via the `friends` list.)
+
 ## [1.9.0]
 - `steam_discover` gains a `released_within_days` filter — "what came out in the last N days" matching your tags/price/taste (newest-first). Release dates ride in the existing batched GetItems call, so no extra requests and negligible token cost.
 
