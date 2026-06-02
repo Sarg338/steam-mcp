@@ -900,6 +900,11 @@ def test_is_temp_client():
         "Halo Infinite - Open Beta",
         "Some Game - Closed Beta",
         "Cool Game Demo",
+        "REMATCH BETA TEST",    # all-caps, mid-string BETA (case-insensitive)
+        "Brawlhalla BETA",
+        "Project X - Alpha Test",
+        "Some Game Dev Build",
+        "World of Foo PTR",
     ]
     for n in temp:
         assert S._is_temp_client(n), f"should flag: {n}"
@@ -908,7 +913,10 @@ def test_is_temp_client():
         "Prototype",            # the 2009 retail game
         "Prototype 2",
         "Trials Rising",
-        "Alpha Protocol",
+        "Alpha Protocol",       # bare 'alpha' is intentionally NOT a token
+        "Sid Meier's Alpha Centauri",
+        "The Turing Test",      # bare 'test' is intentionally NOT a token
+        "Test Drive Unlimited",
         "Counter-Strike 2",
         "Dota 2",
         "Half-Life 2: Episode One",

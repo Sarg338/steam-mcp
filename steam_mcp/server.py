@@ -3523,18 +3523,27 @@ def _ts_to_date(ts):
 # (often with real accrued playtime) but are frequently unlaunchable, so
 # recommending them as "play next" is dead on arrival. We detect them by name
 # (GetOwnedGames carries no type/metadata) — best-effort, tuned for precision so
-# real games aren't hidden. Multi-word / unambiguous markers, matched anywhere:
+# real games aren't hidden. Matching is CASE-INSENSITIVE (re.IGNORECASE), so
+# all-caps names like "REMATCH BETA TEST" are caught.
+#
+# Standalone "beta" (anywhere in the name) + unambiguous multi-word markers. A
+# bare "beta" is safe — a standalone "Beta" word in a retail title is vanishingly
+# rare — and matching it anywhere (not just as a trailing qualifier) is what flags
+# "REMATCH BETA TEST", "Game BETA Weekend", "Open Beta", etc. Do NOT add bare
+# "test" or "alpha" here: they collide with real titles ("The Turing Test", "Test
+# Drive", "Alpha Protocol"), so those only appear in multi-word phrases.
 _TEMP_PHRASE_RE = re.compile(
-    r"\b(?:playtest|public test|test server|closed beta|open beta|beta demo|"
-    r"staging branch|pts)\b",
+    r"\b(?:beta|playtest|play test|public test|test server|test client|"
+    r"test build|alpha test|alpha build|closed alpha|open alpha|staging branch|"
+    r"dev build|developer build|press build|preview build|pts|ptr)\b",
     re.IGNORECASE,
 )
 # Risky single tokens that also occur in real titles ("Prototype", "Prototype 2",
-# "Trials Rising", "Alpha Protocol") — only a signal when they TRAIL a real title
-# word (e.g. "PAYDAY 3 - Beta", "Knockout City Trial", "Spacebase DF-9 Prototype"),
-# never as the whole or leading title.
+# "Trials Rising") — only a signal when they TRAIL a real title word (e.g.
+# "Knockout City Trial", "Spacebase DF-9 Prototype"), never as the whole or
+# leading title. ("beta" is handled above as a standalone word, anywhere.)
 _TEMP_SUFFIX_RE = re.compile(
-    r"\w[\w'’.]*[\s_]*[-:–—]?\s*(?:beta|demo|trial|prototype)\s*$",
+    r"\w[\w'’.]*[\s_]*[-:–—]?\s*(?:demo|trial|prototype)\s*$",
     re.IGNORECASE,
 )
 

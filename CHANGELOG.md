@@ -3,6 +3,20 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.4]
+
+### Fixed
+- **Temp-client matcher now catches names like "REMATCH BETA TEST".** The matcher
+  was already case-insensitive (so all-caps wasn't the issue) — the gap was token
+  coverage: "beta" was only matched as a *trailing* qualifier, and "beta test"
+  wasn't a recognized phrase. Standalone **`beta`** is now matched anywhere in the
+  name, and **`alpha test` / `alpha build` / `closed`+`open alpha` / `play test` /
+  `test server`+`client`+`build` / `dev`+`developer`+`press`+`preview build` /
+  `ptr`** were added. Bare `test` and `alpha` are deliberately still excluded (they
+  collide with *The Turing Test*, *Test Drive*, *Alpha Protocol*, *Alpha Centauri*),
+  so those remain unflagged. Improves `steam_analyze_library`, `steam_recommend`,
+  `steam_discover`, `steam_should_i_buy`, and `steam_plan_coop_night`.
+
 ## [1.7.3]
 
 ### Fixed
@@ -369,6 +383,7 @@ changes will require a 2.0.
   playtime, achievements, store details, reviews, sales, live player counts, and
   news. Bring-your-own-key; packaged as a `.mcpb` desktop extension and for PyPI.
 
+[1.7.4]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.4
 [1.7.3]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.3
 [1.7.2]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.2
 [1.7.1]: https://github.com/Sarg338/steam-mcp/releases/tag/v1.7.1
