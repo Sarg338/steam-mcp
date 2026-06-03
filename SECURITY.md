@@ -17,7 +17,9 @@ or a regular issue for non-sensitive reports. Please include steps to reproduce.
 - **Bring-your-own-key.** The only credential is your own free Steam Web API key,
   read from the `STEAM_API_KEY` environment variable. It is never written to disk,
   logged, cached, or placed in tool output; it's excluded from cache keys, and
-  error messages redact anything resembling a key.
+  error messages redact anything resembling a key. The optional `STEAM_USER`
+  (a default-to-me convenience) is **not** a credential — it's a public Steam
+  profile name and is treated as non-sensitive.
 - **Official hosts only.** Requests go only to `api.steampowered.com`,
   `store.steampowered.com`, and `steamcommunity.com`; the request layer refuses any
   other host (SSRF guard). Market price/inventory use Steam's own (undocumented,

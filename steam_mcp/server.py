@@ -51,6 +51,7 @@ API_BASE = "https://api.steampowered.com"
 STORE_BASE = "https://store.steampowered.com/api"
 HTTP_TIMEOUT = 30.0
 ENV_KEY = "STEAM_API_KEY"
+ENV_USER = "STEAM_USER"  # optional: the user's own SteamID64 / vanity / profile URL
 
 # Bounded retry for transient failures. 429 (rate limit) and 502/503/504 are
 # retried with exponential backoff + jitter, honoring a Retry-After header; other
@@ -214,23 +215,28 @@ class SteamApiError(Exception):
     """Raised for Steam-specific (non-HTTP) problems with an actionable message."""
 
 
-def _load_key_from_dotenv() -> str:
-    """Fallback: read STEAM_API_KEY from a .env file in the project root.
+def _dotenv_value(name: str) -> str:
+    """Read a single NAME=value from a .env file in the project root (gitignored).
 
-    This lets the key live only in .env (which is gitignored) instead of being
-    placed in the MCP client config. The project root is the parent directory of
-    this package, resolved from __file__ so it works regardless of cwd.
+    Lets secrets/config live only in .env instead of the MCP client config. The
+    root is the parent directory of this package, resolved from __file__ so it
+    works regardless of cwd.
     """
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     try:
         with open(os.path.join(root, ".env"), "r", encoding="utf-8-sig") as f:
             for line in f:
                 line = line.strip()
-                if line.startswith(f"{ENV_KEY}="):
+                if line.startswith(f"{name}="):
                     return line.split("=", 1)[1].strip().strip('"').strip()
     except OSError:
         pass
     return ""
+
+
+def _load_key_from_dotenv() -> str:
+    """Fallback: read STEAM_API_KEY from a .env file in the project root."""
+    return _dotenv_value(ENV_KEY)
 
 
 def _get_api_key() -> str:
@@ -243,6 +249,16 @@ def _get_api_key() -> str:
             f"the project. Get a free key at https://steamcommunity.com/dev/apikey"
         )
     return key
+
+
+def _get_default_user() -> str:
+    """Optional default user (STEAM_USER): a SteamID64, vanity name, or profile URL.
+
+    Lets a user set their own identity once (env or .env) so the "about me" tools
+    (library, achievements, wishlist, friends, ...) work without passing a steamid.
+    Returns "" when unset. Not a secret — it's a public profile name.
+    """
+    return os.environ.get(ENV_USER, "").strip() or _dotenv_value(ENV_USER)
 
 
 _CLIENT: Optional[httpx.AsyncClient] = None
@@ -538,17 +554,27 @@ def _privacy_hint(setting: str) -> str:
     )
 
 
-async def _resolve_steamid(identifier: str) -> str:
+async def _resolve_steamid(identifier: Optional[str] = None) -> str:
     """Resolve a flexible identifier to a 17-digit SteamID64.
 
     Accepts:
         - A raw SteamID64 (e.g. "76561197960287930")
         - A vanity / custom-URL name (e.g. "gabelogannewell")
         - A full profile URL (steamcommunity.com/id/<name> or /profiles/<id>)
+        - None / empty -> falls back to the configured STEAM_USER (default user)
 
-    Raises SteamApiError if a vanity name cannot be resolved.
+    Raises SteamApiError if a vanity name cannot be resolved, or if nothing was
+    given and no STEAM_USER is configured.
     """
-    raw = identifier.strip()
+    raw = (identifier or "").strip()
+    if not raw:
+        raw = _get_default_user()
+        if not raw:
+            raise SteamApiError(
+                "No SteamID provided and no default user configured. Pass a "
+                "steamid (SteamID64 / vanity name / profile URL), or set STEAM_USER "
+                "in your MCP client config to your own Steam name."
+            )
 
     # Full profile URL?
     m = PROFILE_URL_RE.search(raw)
@@ -671,12 +697,11 @@ async def _gather_limited(coros, limit: int = FANOUT_LIMIT):
 class PlayerInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
-    steamid: str = Field(
-        ...,
+    steamid: Optional[str] = Field(
+        default=None,
         description="SteamID64 (17 digits), vanity name, or full profile URL "
-        "(e.g. '76561197960287930', 'gabelogannewell', "
-        "'https://steamcommunity.com/id/gabelogannewell').",
-        min_length=1,
+        "(e.g. '76561197960287930', 'gabelogannewell'). Omit to use the configured "
+        "STEAM_USER (your own Steam name), if set.",
         max_length=200,
     )
     response_format: ResponseFormat = Field(
@@ -744,9 +769,9 @@ class PlayersInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
     steamids: list[str] = Field(
-        ...,
-        description="List of SteamID64 / vanity names / profile URLs (max 100).",
-        min_length=1,
+        default_factory=list,
+        description="List of SteamID64 / vanity names / profile URLs (max 100). "
+        "Omit/empty to use the configured STEAM_USER, if set.",
         max_length=100,
     )
     response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
@@ -956,10 +981,10 @@ class StoreHighlightsInput(BaseModel):
 class WishlistInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
-    steamid: str = Field(
-        ...,
-        description="SteamID64, vanity name, or profile URL of the wishlist owner.",
-        min_length=1,
+    steamid: Optional[str] = Field(
+        default=None,
+        description="SteamID64, vanity name, or profile URL of the wishlist owner. "
+        "Omit to use the configured STEAM_USER, if set.",
         max_length=200,
     )
     limit: int = Field(
@@ -1052,7 +1077,7 @@ async def steam_get_player_summary(params: PlayersInput) -> str:
         visibility, profile_url, country (if public), last_logoff.
     """
     try:
-        resolved = [await _resolve_steamid(s) for s in params.steamids]
+        resolved = [await _resolve_steamid(s) for s in (params.steamids or [None])]
         summaries = await _summaries_for(resolved)
         players = [summaries[s] for s in resolved if s in summaries]
         if not players:
@@ -1245,10 +1270,10 @@ async def steam_get_friend_list(params: FriendListInput) -> str:
 class FriendsWhoOwnInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
-    steamid: str = Field(
-        ...,
-        description="The user whose friends to check: SteamID64, vanity, or URL.",
-        min_length=1, max_length=200,
+    steamid: Optional[str] = Field(
+        default=None, max_length=200,
+        description="The user whose friends to check: SteamID64, vanity, or URL. "
+        "Omit to use the configured STEAM_USER, if set.",
     )
     appid: int = Field(
         ..., description="The game (appid) to check friends' ownership of.", ge=1
@@ -3433,10 +3458,10 @@ class PackageDetailsInput(BaseModel):
 class ComparePlayersInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
-    steamid_a: str = Field(
-        ...,
-        description="First user: SteamID64, vanity name, or profile URL.",
-        min_length=1,
+    steamid_a: Optional[str] = Field(
+        default=None,
+        description="First user: SteamID64, vanity name, or profile URL. Omit to "
+        "use the configured STEAM_USER, if set.",
         max_length=200,
     )
     steamid_b: str = Field(
@@ -3798,10 +3823,10 @@ def _is_temp_client(name: str) -> bool:
 class LibraryAnalysisInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
-    steamid: str = Field(
-        ...,
-        description="SteamID64, vanity name, or profile URL of the library owner.",
-        min_length=1,
+    steamid: Optional[str] = Field(
+        default=None,
+        description="SteamID64, vanity name, or profile URL of the library owner. "
+        "Omit to use the configured STEAM_USER, if set.",
         max_length=200,
     )
     top_limit: int = Field(
@@ -4465,10 +4490,10 @@ def _is_online(p: dict) -> bool:
 class PlanCoopNightInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
-    steamid: str = Field(
-        ..., min_length=1, max_length=200,
+    steamid: Optional[str] = Field(
+        default=None, max_length=200,
         description="The host whose library to match against friends. SteamID64, "
-        "vanity, or profile URL.",
+        "vanity, or profile URL. Omit to use the configured STEAM_USER, if set.",
     )
     friends: list[str] = Field(
         default_factory=list, max_length=50,
@@ -4983,9 +5008,10 @@ async def steam_get_user_groups(params: UserGroupsInput) -> str:
 class InventoryInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
-    steamid: str = Field(
-        ..., min_length=1, max_length=200,
-        description="SteamID64, vanity name, or profile URL of the inventory owner.",
+    steamid: Optional[str] = Field(
+        default=None, max_length=200,
+        description="SteamID64, vanity name, or profile URL of the inventory owner. "
+        "Omit to use the configured STEAM_USER, if set.",
     )
     appid: int = Field(
         default=753, ge=1,

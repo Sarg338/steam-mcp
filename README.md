@@ -44,7 +44,8 @@ Cursor / Cline / Windsurf and the manual `pip` setup are under [Setup](#setup) b
 
 ## What it can answer
 
-Account / profile (needs a public profile):
+Account / profile (needs a public profile; set `STEAM_USER` and "my"/"I" default
+to you — no SteamID needed):
 - "Who's on my friends list, and who's online right now?"
 - "Which of my friends own *Helldivers 2* — and who's playing it now?"
 - "It's game night — what co-op games do my online friends and I all own?"
@@ -163,16 +164,23 @@ pip install steam-mcp  # run as: python -m steam_mcp.server
 ### 3. Add it to your MCP client
 
 The server reads your key from the `STEAM_API_KEY` environment variable.
+Optionally, set `STEAM_USER` to your own Steam name (vanity name, SteamID64, or
+profile URL) so the "about me" tools — *your* library, wishlist, achievements,
+friends — default to you whenever you don't name a user. It's a public profile
+name, not a secret, and you can still pass a `steamid` to any call to override it.
 
 **Claude Code**
 
 ```bash
-claude mcp add steam --env STEAM_API_KEY=YOUR_KEY -- uvx steam-mcp
+claude mcp add steam --env STEAM_API_KEY=YOUR_KEY --env STEAM_USER=your_steam_name -- uvx steam-mcp
 ```
+
+> `STEAM_USER` is optional — drop the second `--env` if you'd rather give a
+> SteamID to each call.
 
 **Claude Desktop** — install `steam-mcp.mcpb` from the
 [latest release](https://github.com/Sarg338/steam-mcp/releases/latest) via
-Settings → Extensions and paste your key.
+Settings → Extensions and paste your key (and, optionally, your Steam name).
 
 **Everything else** (Claude Desktop config, Cursor, Cline, Windsurf, VS Code, …) —
 drop this block into the client's MCP config file:
@@ -183,7 +191,10 @@ drop this block into the client's MCP config file:
     "steam": {
       "command": "uvx",
       "args": ["steam-mcp"],
-      "env": { "STEAM_API_KEY": "YOUR_KEY_HERE" }
+      "env": {
+        "STEAM_API_KEY": "YOUR_KEY_HERE",
+        "STEAM_USER": "your_steam_name"
+      }
     }
   }
 }

@@ -4,6 +4,9 @@ A concise, one-line-per-change history. Versions follow
 [Semantic Versioning](https://semver.org/). Releases:
 <https://github.com/Sarg338/steam-mcp/releases>
 
+## [1.11.0]
+- New optional `STEAM_USER` config (set it next to your API key to your Steam vanity name / ID / profile URL). The "about me" tools — library, owned games, achievements, wishlist, friends, inventory, level, bans, badges, groups, co-op night, compare — now default to you when you omit the `steamid`, so you don't have to paste your ID every time. Passing a `steamid` still overrides. The keyless game-finders (discover / should_i_buy / recommend) keep personalization explicit.
+
 ## [1.10.0]
 - `steam_plan_coop_night` gains `mode="new"` — recommend well-reviewed co-op games that NONE of the group owns yet (fresh picks to buy together), vs the default `mode="owned"` (games you already share). (Filtering which friends to include already works via the `friends` list.)
 
