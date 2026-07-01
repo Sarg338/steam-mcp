@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 import steam_mcp.server as S
 from steam_mcp import config, transport
+from steam_mcp.data import pricing, tags
 
 
 def run(coro):
@@ -205,7 +206,7 @@ def test_resolve_tag_ids(monkeypatch):
     async def fake_map():
         return {29482: "Souls-like", 1685: "Co-op"}
 
-    monkeypatch.setattr(S, "_tag_name_map", fake_map)
+    monkeypatch.setattr(tags, "_tag_name_map", fake_map)
     ids, missing = run(S._resolve_tag_ids(["souls-like", "Co-op", "Nonexistent"]))
     assert ids == [29482, 1685]          # case-insensitive
     assert missing == ["Nonexistent"]
@@ -224,7 +225,7 @@ def test_discover_basic(monkeypatch):
     async def fake_app_prices(appids, cc):
         return {a: prices[a] for a in appids}
 
-    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(transport, "_raw_get", fake_raw)
     monkeypatch.setattr(S, "_app_prices", fake_app_prices)
     out = run(S.steam_discover(S.DiscoverInput(term="x", response_format="json")))
     d = json.loads(out)
@@ -247,8 +248,8 @@ def test_discover_explicit_tags(monkeypatch):
     async def fake_app_prices(appids, cc):
         return {a: {"name": "G"} for a in appids}
 
-    monkeypatch.setattr(S, "_tag_name_map", fake_map)
-    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(tags, "_tag_name_map", fake_map)
+    monkeypatch.setattr(transport, "_raw_get", fake_raw)
     monkeypatch.setattr(S, "_app_prices", fake_app_prices)
     out = run(S.steam_discover(S.DiscoverInput(
         tags=["Souls-like"], max_price=20, on_sale=True, platform="win",
@@ -290,9 +291,9 @@ def test_discover_personalized(monkeypatch):
     async def fake_app_prices(appids, cc):
         return {a: prices.get(a, {}) for a in appids}
 
-    monkeypatch.setattr(S, "_steam_get", fake_steam)
-    monkeypatch.setattr(S, "_tag_name_map", fake_map)
-    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(transport, "_steam_get", fake_steam)
+    monkeypatch.setattr(tags, "_tag_name_map", fake_map)
+    monkeypatch.setattr(transport, "_raw_get", fake_raw)
     monkeypatch.setattr(S, "_app_prices", fake_app_prices)
     out = run(S.steam_discover(S.DiscoverInput(
         steamid="76561197960287930", response_format="json")))
@@ -434,6 +435,7 @@ def test_plan_coop_night(monkeypatch):
         return {}
 
     monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(transport, "_steam_get", fake_steam)
     out = run(S.steam_plan_coop_night(
         S.PlanCoopNightInput(steamid=host, response_format="json")))
     d = json.loads(out)
@@ -1189,9 +1191,9 @@ def test_taste_profile_excludes_temp_clients(monkeypatch):
     async def fake_tag_names():
         return {1: "RPG"}
 
-    monkeypatch.setattr(S, "_steam_get", fake_steam)
-    monkeypatch.setattr(S, "_items_tags", fake_items_tags)
-    monkeypatch.setattr(S, "_tag_name_map", fake_tag_names)
+    monkeypatch.setattr(transport, "_steam_get", fake_steam)
+    monkeypatch.setattr(tags, "_items_tags", fake_items_tags)
+    monkeypatch.setattr(tags, "_tag_name_map", fake_tag_names)
 
     prof = run(S._taste_profile(sid))
     # The 99,999-minute playtest and the beta must NOT seed taste.
@@ -1328,7 +1330,7 @@ def test_deck_compatibility(monkeypatch):
     async def fake_raw(url, params, cache_ttl=0):
         return report
 
-    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(transport, "_raw_get", fake_raw)
 
     # Helper: category mapping + loc_token humanization + glyphs.
     d = run(S._deck_compat(730))
@@ -1348,7 +1350,7 @@ def test_deck_compatibility(monkeypatch):
     # No published rating -> friendly message, not an error.
     async def fake_none(url, params, cache_ttl=0):
         return {"success": 0}
-    monkeypatch.setattr(S, "_raw_get", fake_none)
+    monkeypatch.setattr(transport, "_raw_get", fake_none)
     msg = run(S.steam_get_deck_compatibility(S.DeckCompatInput(appid=1)))
     assert "No Steam Deck compatibility rating" in msg
 
@@ -1373,8 +1375,8 @@ def test_app_prices_batch_and_fallback(monkeypatch):
         return {"appid": appid, "name": "Fallback", "is_free": False,
                 "price": "$9.99", "discount_pct": 0, "on_sale": False}
 
-    monkeypatch.setattr(S, "_steam_get", fake_steam)
-    monkeypatch.setattr(S, "_app_price", fake_app_price)
+    monkeypatch.setattr(transport, "_steam_get", fake_steam)
+    monkeypatch.setattr(pricing, "_app_price", fake_app_price)
 
     pm = run(S._app_prices([10, 11, 12], "us"))
     assert set(pm) == {10, 11, 12}
@@ -1399,7 +1401,7 @@ def test_discover_released_within_days(monkeypatch):
     async def fake_app_prices(appids, cc):
         return {a: {"name": f"G{a}", "release_ts": int(rel[a])} for a in appids}
 
-    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(transport, "_raw_get", fake_raw)
     monkeypatch.setattr(S, "_app_prices", fake_app_prices)
     d = json.loads(run(S.steam_discover(S.DiscoverInput(
         released_within_days=30, response_format="json"))))
@@ -1435,7 +1437,7 @@ def test_player_summary(monkeypatch):
             {"steamid": "76561197960287930", "personaname": "Gabe",
              "personastate": 1, "communityvisibilitystate": 3}]}}
 
-    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(transport, "_steam_get", fake_steam)
     out = run(S.steam_get_player_summary(
         S.PlayersInput(steamids=["76561197960287930"])))
     assert "Gabe" in out and "Online" in out
@@ -1651,7 +1653,7 @@ def test_get_app_tags(monkeypatch):
         return [{"tagid": 10, "name": "Roguelike"}, {"tagid": 20, "name": "Co-op"}]
 
     monkeypatch.setattr(S, "_steam_get", fake_steam)
-    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(transport, "_raw_get", fake_raw)
     out = run(S.steam_get_app_tags(S.AppTagsInput(appid=1, response_format="json")))
     d = json.loads(out)
     assert d["name"] == "Game"
@@ -1704,6 +1706,7 @@ def test_friends_who_own(monkeypatch):
         return {"name": "Counter-Strike 2"}
 
     monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(transport, "_steam_get", fake_steam)
     monkeypatch.setattr(S, "_app_price", fake_app_price)
     out = run(S.steam_find_friends_who_own(
         S.FriendsWhoOwnInput(steamid="76561197960287930", appid=730,

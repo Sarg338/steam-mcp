@@ -80,6 +80,31 @@ from steam_mcp.constants import (  # noqa: F401
     STEAMID64_RE,
     VISIBILITY_STATES,
 )
+from steam_mcp.data.catalog import (  # noqa: F401
+    SEARCH_URL,
+    _deck_compat,
+    _discover_appids,
+    _is_temp_client,
+    _items_coop,
+    _TEMP_PHRASE_RE,
+    _TEMP_SUFFIX_RE,
+)
+from steam_mcp.data.players import (  # noqa: F401
+    _is_online,
+    _owned_set,
+    _summaries_for,
+)
+from steam_mcp.data.pricing import (  # noqa: F401
+    _app_price,
+    _app_prices,
+    _fetch_featured,
+)
+from steam_mcp.data.tags import (  # noqa: F401
+    _items_tags,
+    _resolve_tag_ids,
+    _tag_name_map,
+    _taste_profile,
+)
 from steam_mcp.errors import (  # noqa: F401
     PRIVACY_SETTINGS_URL,
     SteamApiError,
@@ -129,62 +154,6 @@ from steam_mcp.transport import (  # noqa: F401
     _steam_post,
     _store_get,
 )
-
-# ---------------------------------------------------------------------------
-# Shared helpers
-# ---------------------------------------------------------------------------
-
-async def _deck_compat(appid: int, language: str = "english") -> Optional[dict]:
-    """Steam Deck compatibility report for an app (no key, cached 24h).
-
-    Returns {category, label, items:[{status, text}], blog_url} or None if the app
-    has no published rating. `resolved_category` 0/1/2/3 = Unknown/Unsupported/
-    Playable/Verified; `resolved_items` carry a loc_token (no localized string, so
-    we humanize the CamelCase) and a display_type glyph. Verified live 2026-06.
-    """
-    data = await _raw_get(
-        DECK_COMPAT_URL, {"nAppID": appid, "l": language}, cache_ttl=CACHE_TTL_DECK
-    )
-    if not isinstance(data, dict) or not data.get("success"):
-        return None
-    res = data.get("results") or {}
-    cat = res.get("resolved_category")
-    if cat is None:
-        return None
-    items = []
-    for it in res.get("resolved_items") or []:
-        token = (it.get("loc_token") or "")[:200].replace(
-            "#SteamDeckVerified_TestResult_", ""
-        )
-        text = re.sub(r"(?<!^)(?=[A-Z])", " ", token).strip()
-        items.append({
-            "status": DECK_ITEM_STATUS.get(it.get("display_type"), "•"),
-            "text": text,
-        })
-    return {
-        "category": cat,
-        "label": DECK_CATEGORIES.get(cat, "Unknown"),
-        "items": items,
-        "blog_url": res.get("steam_deck_blog_url") or None,
-    }
-
-
-async def _summaries_for(steamids: list[str]) -> dict[str, dict]:
-    """Fetch player summaries for many SteamIDs, chunked at 100 per call.
-
-    Returns a dict keyed by SteamID64.
-    """
-    out: dict[str, dict] = {}
-    for i in range(0, len(steamids), 100):
-        chunk = steamids[i : i + 100]
-        data = await _steam_get(
-            "ISteamUser/GetPlayerSummaries/v2/",
-            {"steamids": ",".join(chunk)},
-        )
-        for p in data.get("response", {}).get("players", []):
-            out[p["steamid"]] = p
-    return out
-
 
 # ---------------------------------------------------------------------------
 # Input models
@@ -1833,26 +1802,6 @@ class AppTagsInput(BaseModel):
     response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
 
 
-async def _tag_name_map() -> dict:
-    """Map Steam community tagid -> display name (cached; static-ish, no key).
-
-    GetItems returns only tagids + weights; this storefront dictionary supplies the
-    human names (e.g. 29482 -> 'Souls-like').
-    """
-    data = await _raw_get(
-        "https://store.steampowered.com/tagdata/populartags/english",
-        {}, cache_ttl=CACHE_TTL_TAGMAP,
-    )
-    out: dict = {}
-    if isinstance(data, list):
-        for t in data:
-            try:
-                out[int(t.get("tagid"))] = t.get("name")
-            except (TypeError, ValueError):
-                continue
-    return out
-
-
 @mcp.tool(
     name="steam_get_app_tags",
     annotations={
@@ -1936,8 +1885,6 @@ async def steam_get_app_tags(params: AppTagsInput) -> str:
 
 # --- Discovery: filtered search + optional personalization ------------------
 
-SEARCH_URL = "https://store.steampowered.com/search/results/"
-
 # Friendly sort name -> Steam search sort_by value ("" = let Steam default).
 _SORT_MAP = {
     "reviews": "Reviews_DESC",
@@ -1946,134 +1893,6 @@ _SORT_MAP = {
     "price_desc": "Price_DESC",
     "relevance": "",
 }
-
-
-async def _resolve_tag_ids(names: list[str]) -> tuple[list[int], list[str]]:
-    """Resolve community tag NAMES to Steam tag IDs via the cached dictionary.
-
-    Returns (ids, unresolved_names); case-insensitive.
-    """
-    if not names:
-        return [], []
-    name_map = await _tag_name_map()  # {tagid: name}
-    rev = {(nm or "").lower(): tid for tid, nm in name_map.items()}
-    ids, missing = [], []
-    for n in names:
-        tid = rev.get(n.strip().lower())
-        if tid is not None:
-            ids.append(tid)
-        else:
-            missing.append(n)
-    return ids, missing
-
-
-async def _items_tags(appids: list[int]) -> dict:
-    """One GetItems call -> {appid: [{tagid, weight}, ...]} for many apps (no key)."""
-    if not appids:
-        return {}
-    body = {
-        "ids": [{"appid": a} for a in appids],
-        "context": {"language": "english", "country_code": "US", "steam_realm": 1},
-        "data_request": {"include_tag_count": 20},
-    }
-    data = await _steam_get(
-        "IStoreBrowseService/GetItems/v1/",
-        {"input_json": json.dumps(body, separators=(",", ":"))},
-        with_key=False,
-        cache_ttl=CACHE_TTL_TAGS,
-    )
-    out = {}
-    for it in (data.get("response") or {}).get("store_items", []):
-        out[it.get("appid")] = it.get("tags") or []
-    return out
-
-
-async def _taste_profile(sid: str, max_seed: int = 12, top_tags: int = 5) -> dict:
-    """Build a taste profile from a user's recent + most-played games.
-
-    Returns {owned_ids, tag_ids, tag_names, seed_games}: the games the user owns
-    (for exclusion), and the top community tags aggregated by weight across their
-    seed games (one batched GetItems call).
-    """
-    owned_d, recent_d = await asyncio.gather(
-        _steam_get(
-            "IPlayerService/GetOwnedGames/v1/",
-            {"steamid": sid, "include_appinfo": 1, "include_played_free_games": 1},
-        ),
-        _steam_get("IPlayerService/GetRecentlyPlayedGames/v1/", {"steamid": sid}),
-    )
-    games = owned_d.get("response", {}).get("games", []) or []
-    owned_ids = {g.get("appid") for g in games}
-    name_by_id = {g.get("appid"): g.get("name") for g in games}
-    # Don't let beta/playtest/demo/test clients seed taste — a 165h playtest would
-    # otherwise dominate the tag profile (same _is_temp_client filter the library
-    # analysis uses). owned_ids stays full, since it's only used to exclude games
-    # the user already owns from recommendations.
-    by_play = sorted(
-        (g for g in games
-         if g.get("playtime_forever", 0) > 0
-         and not _is_temp_client(g.get("name", ""))),
-        key=lambda g: g.get("playtime_forever", 0), reverse=True,
-    )
-    recent = [
-        g for g in (recent_d.get("response", {}).get("games", []) or [])
-        if not _is_temp_client(g.get("name", ""))
-    ]
-    for g in recent:
-        name_by_id.setdefault(g.get("appid"), g.get("name"))
-
-    # Seed from recent games (current taste) first, then most-played.
-    seed: list[int] = []
-    for g in recent + by_play:
-        a = g.get("appid")
-        if a and a not in seed:
-            seed.append(a)
-        if len(seed) >= max_seed:
-            break
-    if not seed:
-        return {"owned_ids": owned_ids, "tag_ids": [], "tag_names": [], "seed_games": []}
-
-    tags_by_app = await _items_tags(seed)
-    weights: dict[int, float] = {}
-    for a in seed:
-        for t in tags_by_app.get(a, []):
-            try:
-                tid = int(t.get("tagid"))
-            except (TypeError, ValueError):
-                continue
-            weights[tid] = weights.get(tid, 0) + (t.get("weight") or 1)
-    top = sorted(weights.items(), key=lambda kv: kv[1], reverse=True)[:top_tags]
-    name_map = await _tag_name_map()
-    tag_ids = [tid for tid, _ in top]
-    tag_names = [name_map[tid] for tid, _ in top if name_map.get(tid)]
-    display = [g.get("name") for g in by_play[:5]] or [name_by_id.get(a) for a in seed[:5]]
-    return {
-        "owned_ids": owned_ids,
-        "tag_ids": tag_ids,
-        "tag_names": tag_names,
-        "seed_games": [n for n in display if n],
-    }
-
-
-async def _discover_appids(query: dict) -> tuple[list[int], int]:
-    """Run the storefront search; return (ranked_appids, total_count).
-
-    The store search returns rendered HTML, so we pull the ranked app IDs from the
-    stable `data-ds-appid` attribute on each result row. Guarded: an empty/garbled
-    response simply yields no IDs.
-    """
-    data = await _raw_get(SEARCH_URL, query, cache_ttl=CACHE_TTL_DISCOVER)
-    if not isinstance(data, dict):
-        return [], 0
-    html = data.get("results_html") or ""
-    ids: list[int] = []
-    seen = set()
-    for m in re.finditer(r'data-ds-appid="(\d+)', html):
-        a = int(m.group(1))
-        if a not in seen:
-            seen.add(a)
-            ids.append(a)
-    return ids, data.get("total_count", len(ids))
 
 
 class DiscoverInput(BaseModel):
@@ -2492,12 +2311,6 @@ async def steam_get_app_reviews(params: AppReviewsInput) -> str:
         return _handle_error(e)
 
 
-async def _fetch_featured(cc: str) -> dict:
-    """Fetch the storefront featuredcategories payload (no key required)."""
-    return await _store_get("featuredcategories", {"cc": cc, "l": "english"},
-                            cache_ttl=CACHE_TTL_FEATURED)
-
-
 def _featured_rows(items: list, limit: int) -> list:
     """Normalize featuredcategories items into compact rows."""
     rows = []
@@ -2513,100 +2326,6 @@ def _featured_rows(items: list, limit: int) -> list:
             }
         )
     return rows
-
-
-async def _app_price(appid: int, cc: str) -> dict:
-    """Fetch a single app's name + current price/discount via the store API."""
-    try:
-        data = await _store_get(
-            "appdetails",
-            {
-                "appids": appid,
-                "cc": cc,
-                "l": "english",
-                "filters": "basic,price_overview",
-            },
-            cache_ttl=CACHE_TTL_APPDETAILS,
-        )
-        entry = data.get(str(appid), {})
-        if not entry.get("success"):
-            return {"appid": appid, "name": None, "price": None, "is_free": False,
-                "on_sale": False, "discount_pct": 0}
-        d = entry.get("data", {})
-        price = d.get("price_overview") or {}
-        is_free = d.get("is_free", False)
-        disc = price.get("discount_percent", 0) or 0
-        return {
-            "appid": appid,
-            "name": d.get("name"),
-            "is_free": is_free,
-            "price": price.get("final_formatted") or ("Free" if is_free else None),
-            "discount_pct": disc,
-            "on_sale": disc > 0,
-        }
-    except Exception:  # noqa: BLE001
-        return {"appid": appid, "name": None, "price": None, "is_free": False,
-                "on_sale": False, "discount_pct": 0}
-
-
-async def _app_prices(appids: list[int], cc: str = "us") -> dict[int, dict]:
-    """Batched name + price/discount for many appids — ONE GetItems call per ~50,
-    vs N appdetails calls. Same per-appid shape as `_app_price`, returned as a
-    {appid: info} map. GetItems runs on the roomier Web API host (no key) and
-    returns a preformatted price; any appid it can't price (bundle/region-locked/
-    delisted) falls back to a single `_app_price` so callers still get a result.
-    """
-    ids = [a for a in dict.fromkeys(appids) if a]  # dedupe, drop falsy, keep order
-    if not ids:
-        return {}
-    out: dict[int, dict] = {}
-
-    async def _chunk(chunk: list[int]) -> dict:
-        body = {
-            "ids": [{"appid": a} for a in chunk],
-            "context": {"language": "english", "country_code": cc.upper(),
-                        "steam_realm": 1},
-            "data_request": {"include_basic_info": True,
-                             "include_all_purchase_options": True,
-                             "include_release": True},
-        }
-        data = await _steam_get(
-            "IStoreBrowseService/GetItems/v1/",
-            {"input_json": json.dumps(body, separators=(",", ":"))},
-            with_key=False, cache_ttl=CACHE_TTL_APPDETAILS,
-        )
-        res: dict[int, dict] = {}
-        for it in (data.get("response") or {}).get("store_items", []) or []:
-            aid = it.get("appid")
-            if not aid:
-                continue
-            is_free = bool(it.get("is_free"))
-            bpo = it.get("best_purchase_option") or {}
-            disc = bpo.get("discount_pct") or 0
-            price = bpo.get("formatted_final_price") or ("Free" if is_free else None)
-            try:
-                rts = int((it.get("release") or {}).get("steam_release_date"))
-            except (TypeError, ValueError):
-                rts = None
-            res[aid] = {
-                "appid": aid, "name": it.get("name"), "is_free": is_free,
-                "price": price, "discount_pct": disc, "on_sale": disc > 0,
-                "release_ts": rts,
-            }
-        return res
-
-    chunks = [ids[i:i + 50] for i in range(0, len(ids), 50)]
-    for part in await _gather_limited([_chunk(c) for c in chunks]):
-        if part:
-            out.update(part)
-
-    # Fallback for appids GetItems didn't price (absent, or paid with no price).
-    missing = [a for a in ids
-               if a not in out or (not out[a]["price"] and not out[a]["is_free"])]
-    if missing:
-        fills = await _gather_limited([_app_price(a, cc) for a in missing])
-        out.update({p["appid"]: p for p in fills})
-    return out
 
 
 @mcp.tool(
@@ -3218,45 +2937,6 @@ async def steam_compare_players(params: ComparePlayersInput) -> str:
 # ---------------------------------------------------------------------------
 # Helpers + library analysis
 # ---------------------------------------------------------------------------
-
-# Beta/playtest/demo/test clients show up in GetOwnedGames as ordinary "games"
-# (often with real accrued playtime) but are frequently unlaunchable, so
-# recommending them as "play next" is dead on arrival. We detect them by name
-# (GetOwnedGames carries no type/metadata) — best-effort, tuned for precision so
-# real games aren't hidden. Matching is CASE-INSENSITIVE (re.IGNORECASE), so
-# all-caps names like "REMATCH BETA TEST" are caught.
-#
-# Standalone "beta" (anywhere in the name) + unambiguous multi-word markers. A
-# bare "beta" is safe — a standalone "Beta" word in a retail title is vanishingly
-# rare — and matching it anywhere (not just as a trailing qualifier) is what flags
-# "REMATCH BETA TEST", "Game BETA Weekend", "Open Beta", etc. Do NOT add bare
-# "test" or "alpha" here: they collide with real titles ("The Turing Test", "Test
-# Drive", "Alpha Protocol"), so those only appear in multi-word phrases.
-_TEMP_PHRASE_RE = re.compile(
-    r"\b(?:beta|playtest|play test|public test|test server|test client|"
-    r"test build|alpha test|alpha build|closed alpha|open alpha|staging branch|"
-    r"dev build|developer build|press build|preview build|pts|ptr)\b",
-    re.IGNORECASE,
-)
-# Risky single tokens that also occur in real titles ("Prototype", "Prototype 2",
-# "Trials Rising") — only a signal when they TRAIL a real title word (e.g.
-# "Knockout City Trial", "Spacebase DF-9 Prototype"), never as the whole or
-# leading title. ("beta" is handled above as a standalone word, anywhere.)
-_TEMP_SUFFIX_RE = re.compile(
-    r"\w[\w'’.]*[\s_]*[-:–—]?\s*(?:demo|trial|prototype)\s*$",
-    re.IGNORECASE,
-)
-
-
-def _is_temp_client(name: str) -> bool:
-    """Heuristic: does this name look like a non-retail client (beta, playtest,
-    demo, trial, test server, staging branch, prototype) rather than a shipped
-    game? Name-based and best-effort, tuned to avoid hiding real games."""
-    # Cap length: _TEMP_SUFFIX_RE is O(n^2) worst-case, and this runs on every
-    # owned-game name. Real Steam app names are well under 200 chars.
-    n = (name or "").strip()[:200]
-    return bool(_TEMP_PHRASE_RE.search(n) or _TEMP_SUFFIX_RE.search(n))
-
 
 class LibraryAnalysisInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
@@ -3870,59 +3550,6 @@ async def steam_recommend(params: RecommendInput) -> str:
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001
         return _handle_error(e)
-
-
-async def _owned_set(sid: str) -> Optional[set]:
-    """Return a user's owned appids as a set, or None if their library is private."""
-    d = await _steam_get(
-        "IPlayerService/GetOwnedGames/v1/",
-        {"steamid": sid, "include_appinfo": 0, "include_played_free_games": 1},
-    )
-    resp = d.get("response", {})
-    if not resp:
-        return None
-    return {g.get("appid") for g in resp.get("games", []) if g.get("appid")}
-
-
-async def _items_coop(appids: list[int]) -> dict:
-    """Batched GetItems -> {appid: {"name": str, "coop": bool}} (no key).
-
-    Co-op is read from `categories.supported_player_categoryids` against the known
-    co-op category IDs. Chunked so request URLs stay reasonable.
-    """
-    if not appids:
-        return {}
-
-    async def _chunk(ids):
-        body = {
-            "ids": [{"appid": a} for a in ids],
-            "context": {"language": "english", "country_code": "US", "steam_realm": 1},
-            "data_request": {"include_basic_info": True, "include_categories": True},
-        }
-        data = await _steam_get(
-            "IStoreBrowseService/GetItems/v1/",
-            {"input_json": json.dumps(body, separators=(",", ":"))},
-            with_key=False, cache_ttl=CACHE_TTL_TAGS,
-        )
-        out = {}
-        for it in (data.get("response") or {}).get("store_items", []):
-            cats = ((it.get("categories") or {}).get("supported_player_categoryids")) or []
-            out[it.get("appid")] = {
-                "name": it.get("name"),
-                "coop": bool(set(cats) & COOP_CATEGORY_IDS),
-            }
-        return out
-
-    chunks = [appids[i:i + 50] for i in range(0, len(appids), 50)]
-    merged = {}
-    for part in await _gather_limited([_chunk(c) for c in chunks]):
-        merged.update(part)
-    return merged
-
-
-def _is_online(p: dict) -> bool:
-    """True if a player summary indicates online or in-game (not Offline)."""
-    return bool(p) and (p.get("personastate", 0) != 0 or bool(p.get("gameextrainfo")))
 
 
 class PlanCoopNightInput(BaseModel):
