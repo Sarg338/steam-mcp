@@ -21,411 +21,118 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
-import os
-import random
 import re
 import time
-from enum import Enum
-from typing import Any, Optional
-from urllib.parse import quote, urlsplit
+from typing import Optional
+from urllib.parse import quote
 
-import httpx
+# httpx stays importable as an attribute of this module: the HTTP layer moved to
+# steam_mcp.transport, but tests still reach httpx via `S.httpx`.
+import httpx  # noqa: F401
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from mcp.server.fastmcp import FastMCP
-
 # ---------------------------------------------------------------------------
-# Server + constants
+# TEMPORARY SCAFFOLDING (package split, Phase 1). Every name that moved out of
+# this module is re-imported here so that (a) the remaining tool code below
+# resolves it unchanged and (b) `import steam_mcp.server as S` still exposes it
+# for the tests. Delete this block in Phase 3/4 once callers and tests import
+# the new modules directly.
 # ---------------------------------------------------------------------------
-
-mcp = FastMCP("steam_mcp")
-
-# Security: httpx/httpcore log full request URLs at INFO, and Steam requires the
-# API key as a `?key=` query param — so quiet those loggers to keep the key out of
-# any logs the host might capture.
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-
-API_BASE = "https://api.steampowered.com"
-STORE_BASE = "https://store.steampowered.com/api"
-HTTP_TIMEOUT = 30.0
-ENV_KEY = "STEAM_API_KEY"
-ENV_USER = "STEAM_USER"  # optional: the user's own SteamID64 / vanity / profile URL
-
-# Bounded retry for transient failures. 429 (rate limit) and 502/503/504 are
-# retried with exponential backoff + jitter, honoring a Retry-After header; other
-# statuses (401/403/404/500) fail fast since retrying won't help.
-MAX_RETRIES = 3
-RETRY_BASE_DELAY = 0.5
-RETRY_MAX_DELAY = 10.0
-RETRYABLE_STATUS = {429, 502, 503, 504}
-
-# Security: only these Steam hosts may be contacted (SSRF defense-in-depth — we
-# never take a URL from the user, but the request layer enforces it anyway).
-ALLOWED_HOSTS = frozenset({
-    "api.steampowered.com",
-    "store.steampowered.com",
-    "steamcommunity.com",
-})
-
-# Proactive per-host rate limiting (token bucket: sustained `rate`/sec, burst up to
-# `burst`). Bursts ≥ the fan-out cap so concurrent enrichment isn't serialized;
-# steamcommunity (market/inventory) is the strict one. Complements the 429 retry.
-RATE_LIMITS = {
-    "api.steampowered.com": (20.0, 20),
-    "store.steampowered.com": (8.0, 12),
-    "steamcommunity.com": (2.0, 5),
-}
-
-# Recent-reviews computation: Steam's query_summary is always lifetime, so the
-# recent (last-N-days) score is computed by paginating the newest reviews. These
-# bound that work so a hugely-reviewed game can't trigger unbounded requests.
-RECENT_PAGE_SIZE = 100
-MAX_RECENT_PAGES = 6  # up to 600 most-recent reviews considered
-
-# Steam persona (online) states -> human-readable label.
-PERSONA_STATES = {
-    0: "Offline",
-    1: "Online",
-    2: "Busy",
-    3: "Away",
-    4: "Snooze",
-    5: "Looking to trade",
-    6: "Looking to play",
-}
-
-# Community visibility states from GetPlayerSummaries.
-VISIBILITY_STATES = {
-    1: "Private",
-    2: "Friends only",
-    3: "Public",
-}
-
-# Currency code -> display symbol. Steam's storefront list endpoints (storesearch,
-# featuredcategories, packagedetails) return prices in the requested country's
-# currency as integer minor units plus a currency code, but no preformatted
-# string -- so we format them ourselves. Unknown codes fall back to
-# "<amount> <CODE>", and a missing code falls back to "$".
-CURRENCY_SYMBOLS = {
-    "USD": "$", "GBP": "£", "EUR": "€", "JPY": "¥", "CNY": "¥",
-    "KRW": "₩", "INR": "₹", "RUB": "₽", "BRL": "R$", "CAD": "CA$",
-    "AUD": "A$", "NZD": "NZ$", "MXN": "MX$", "ARS": "ARS$", "CLP": "CLP$",
-    "COP": "COL$", "PEN": "S/.", "ZAR": "R", "TRY": "₺", "UAH": "₴",
-    "PLN": "zł", "CHF": "CHF", "SEK": "kr", "NOK": "kr", "DKK": "kr",
-    "HKD": "HK$", "TWD": "NT$", "SGD": "S$", "THB": "฿", "VND": "₫",
-    "IDR": "Rp", "MYR": "RM", "PHP": "₱", "AED": "AED", "SAR": "SAR",
-    "ILS": "₪", "KZT": "₸", "CRC": "₡",
-}
-
-# Steam store "supported player" category IDs that indicate co-op play, used to
-# detect co-op games from IStoreBrowseService/GetItems. 9=Co-op, 24=Shared/Split
-# Screen, 38=Online Co-op, 39=LAN Co-op.
-COOP_CATEGORY_IDS = {9, 24, 38, 39}
-
-PROFILE_URL_RE = re.compile(r"steamcommunity\.com/(profiles|id)/([^/?#]+)", re.IGNORECASE)
-STEAMID64_RE = re.compile(r"^7656\d{13}$")  # 17-digit SteamID64 starting 7656
-
-
-# --- Static-response cache (per-process, opt-in) -----------------------------
-CACHE_TTL_APPDETAILS = 600      # 10 min (price can change on sales)
-CACHE_TTL_PACKAGE = 3600
-CACHE_TTL_FEATURED = 300        # 5 min
-CACHE_TTL_SCHEMA = 86400        # achievement/stat definitions are static
-CACHE_TTL_GLOBAL_ACH = 3600
-CACHE_TTL_TAGS = 3600           # community tag weights (slow-changing)
-CACHE_TTL_TAGMAP = 86400        # tagid -> name dictionary is effectively static
-CACHE_TTL_DISCOVER = 300        # storefront search results (5 min)
-CACHE_TTL_NEWS = 900            # news / patch notes change slowly (15 min)
-CACHE_TTL_REVIEWS = 300         # lifetime review summary (5 min)
-CACHE_TTL_WORKSHOP = 3600       # workshop item metadata (slow-changing)
-CACHE_TTL_GROUP = 3600          # group name / url / member count (slow-changing)
-CACHE_TTL_MARKET = 600          # market price (10 min — also eases the tight rate limit)
-CACHE_TTL_DECK = 86400          # Steam Deck compatibility rating (effectively static)
-
-# Steam Deck compatibility (storefront `ajaxgetdeckappcompatibilityreport`):
-# resolved_category -> label; resolved_items[].display_type -> a glyph.
-DECK_COMPAT_URL = "https://store.steampowered.com/saleaction/ajaxgetdeckappcompatibilityreport"
-DECK_CATEGORIES = {0: "Unknown", 1: "Unsupported", 2: "Playable", 3: "Verified"}
-DECK_ITEM_STATUS = {2: "✗", 3: "⚠", 4: "✓"}
-
-# CS2/CSGO item wear tiers, as they appear in a market_hash_name's trailing (…).
-CS_EXTERIORS = (
-    "Factory New", "Minimal Wear", "Field-Tested", "Well-Worn", "Battle-Scarred",
+from steam_mcp.app import mcp  # noqa: F401
+from steam_mcp.cache import (  # noqa: F401
+    CACHE_TTL_APPDETAILS,
+    CACHE_TTL_DECK,
+    CACHE_TTL_DISCOVER,
+    CACHE_TTL_FEATURED,
+    CACHE_TTL_GLOBAL_ACH,
+    CACHE_TTL_GROUP,
+    CACHE_TTL_MARKET,
+    CACHE_TTL_NEWS,
+    CACHE_TTL_PACKAGE,
+    CACHE_TTL_REVIEWS,
+    CACHE_TTL_SCHEMA,
+    CACHE_TTL_TAGMAP,
+    CACHE_TTL_TAGS,
+    CACHE_TTL_WORKSHOP,
+    _CACHE,
+    _cache_key,
+    _TTLCache,
 )
-
-
-class _TTLCache:
-    """Tiny in-memory TTL cache for static GET responses.
-
-    Keeps the server gentle on Steam's rate limit and speeds up tools that fan
-    out many lookups (wishlist enrichment, library/app detail comparisons). Only
-    static endpoints opt in via a positive cache_ttl; live data (player status,
-    current players, wishlists, friends) is never cached.
-    """
-
-    def __init__(self, maxsize: int = 256):
-        self._d: dict[str, tuple[float, Any]] = {}
-        self._max = maxsize
-
-    def get(self, key: str):
-        item = self._d.get(key)
-        if not item:
-            return None
-        expiry, value = item
-        if expiry < time.time():
-            self._d.pop(key, None)
-            return None
-        return value
-
-    def set(self, key: str, value: Any, ttl: float) -> None:
-        if len(self._d) >= self._max:
-            now = time.time()
-            for k in [k for k, (e, _) in self._d.items() if e < now]:
-                self._d.pop(k, None)
-            if len(self._d) >= self._max:
-                self._d.clear()
-        self._d[key] = (time.time() + ttl, value)
-
-    def clear(self) -> None:
-        self._d.clear()
-
-
-_CACHE = _TTLCache()
-
-
-def _cache_key(prefix: str, params: dict) -> str:
-    """Stable cache key from a path/URL + params, excluding the secret API key."""
-    items = sorted((k, v) for k, v in params.items() if k != "key")
-    return prefix + "?" + "&".join(f"{k}={v}" for k, v in items)
-
+from steam_mcp.config import (  # noqa: F401
+    ENV_KEY,
+    ENV_USER,
+    _dotenv_value,
+    _get_api_key,
+    _get_default_user,
+    _load_key_from_dotenv,
+)
+from steam_mcp.constants import (  # noqa: F401
+    COOP_CATEGORY_IDS,
+    CS_EXTERIORS,
+    CURRENCY_SYMBOLS,
+    DECK_CATEGORIES,
+    DECK_COMPAT_URL,
+    DECK_ITEM_STATUS,
+    MAX_RECENT_PAGES,
+    PERSONA_STATES,
+    PROFILE_URL_RE,
+    RECENT_PAGE_SIZE,
+    STEAMID64_RE,
+    VISIBILITY_STATES,
+)
+from steam_mcp.errors import (  # noqa: F401
+    PRIVACY_SETTINGS_URL,
+    SteamApiError,
+    _handle_error,
+    _privacy_hint,
+    _scrub,
+)
+from steam_mcp.identity import _resolve_steamid  # noqa: F401
+from steam_mcp.render import (  # noqa: F401
+    _STRIP_HTML_MAX,
+    _dump,
+    _fmt_amount,
+    _hours_str,
+    _minutes_to_hours,
+    _parse_languages,
+    _persona_label,
+    _strip_html,
+    _ts_to_date,
+    ResponseFormat,
+)
+from steam_mcp.transport import (  # noqa: F401
+    ALLOWED_HOSTS,
+    API_BASE,
+    FANOUT_LIMIT,
+    HTTP_TIMEOUT,
+    MAX_RETRIES,
+    RATE_LIMITS,
+    RETRY_BASE_DELAY,
+    RETRY_MAX_DELAY,
+    RETRYABLE_STATUS,
+    STORE_BASE,
+    _Bucket,
+    _BUCKETS,
+    _check_host,
+    # _CLIENT / _CLIENT_LOOP deliberately NOT re-imported: they are rebindable
+    # globals, so a from-import would be a stale snapshot — read them via
+    # steam_mcp.transport instead.
+    _enforce_host,
+    _gather_limited,
+    _get_with_retry,
+    _http_client,
+    _rate_limit,
+    _raw_get,
+    _raw_get_text,
+    _retry_delay,
+    _steam_get,
+    _steam_post,
+    _store_get,
+)
 
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
-
-class ResponseFormat(str, Enum):
-    """Output format for tool responses."""
-
-    MARKDOWN = "markdown"
-    JSON = "json"
-
-
-class SteamApiError(Exception):
-    """Raised for Steam-specific (non-HTTP) problems with an actionable message."""
-
-
-def _dotenv_value(name: str) -> str:
-    """Read a single NAME=value from a .env file in the project root (gitignored).
-
-    Lets secrets/config live only in .env instead of the MCP client config. The
-    root is the parent directory of this package, resolved from __file__ so it
-    works regardless of cwd.
-    """
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    try:
-        with open(os.path.join(root, ".env"), "r", encoding="utf-8-sig") as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith(f"{name}="):
-                    return line.split("=", 1)[1].strip().strip('"').strip()
-    except OSError:
-        pass
-    return ""
-
-
-def _load_key_from_dotenv() -> str:
-    """Fallback: read STEAM_API_KEY from a .env file in the project root."""
-    return _dotenv_value(ENV_KEY)
-
-
-def _get_api_key() -> str:
-    """Read the Steam Web API key from the environment or .env, or raise."""
-    key = os.environ.get(ENV_KEY, "").strip() or _load_key_from_dotenv()
-    if not key:
-        raise SteamApiError(
-            f"No Steam Web API key configured. Set the {ENV_KEY} environment "
-            f"variable in your MCP client config, or put it in a .env file next to "
-            f"the project. Get a free key at https://steamcommunity.com/dev/apikey"
-        )
-    return key
-
-
-def _get_default_user() -> str:
-    """Optional default user (STEAM_USER): a SteamID64, vanity name, or profile URL.
-
-    Lets a user set their own identity once (env or .env) so the "about me" tools
-    (library, achievements, wishlist, friends, ...) work without passing a steamid.
-    Returns "" when unset. Not a secret — it's a public profile name.
-    """
-    return os.environ.get(ENV_USER, "").strip() or _dotenv_value(ENV_USER)
-
-
-_CLIENT: Optional[httpx.AsyncClient] = None
-_CLIENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
-
-
-def _http_client() -> httpx.AsyncClient:
-    """Return a shared AsyncClient bound to the *current* event loop.
-
-    Reusing one client avoids a fresh TCP/TLS handshake per request and lets the
-    fan-out tools (wishlist, DLC, comparisons) run many concurrent lookups over
-    pooled connections; an AsyncClient is safe for concurrent use. An AsyncClient
-    binds to the loop it first runs on, so if the running loop has changed (e.g. a
-    fresh asyncio.run() in a script or test) we recreate it — otherwise reuse would
-    raise "RuntimeError: Event loop is closed". The long-lived MCP server uses a
-    single loop, so in normal operation the client is created exactly once.
-    """
-    global _CLIENT, _CLIENT_LOOP
-    loop = asyncio.get_running_loop()
-    if _CLIENT is None or _CLIENT.is_closed or _CLIENT_LOOP is not loop:
-        _CLIENT = httpx.AsyncClient(
-            timeout=HTTP_TIMEOUT,
-            follow_redirects=True,
-            headers={"Accept": "application/json"},
-            event_hooks={"request": [_enforce_host]},
-        )
-        _CLIENT_LOOP = loop
-    return _CLIENT
-
-
-def _check_host(url: str) -> None:
-    """Reject any request whose host isn't a known Steam host (SSRF guard)."""
-    host = (urlsplit(url).hostname or "").lower()
-    if host not in ALLOWED_HOSTS:
-        raise SteamApiError(f"Refusing request to non-Steam host: {host or url!r}")
-
-
-async def _enforce_host(request: httpx.Request) -> None:
-    """httpx request hook: enforce the allowlist on EVERY hop, including redirects.
-
-    The client follows redirects, so a pre-flight `_check_host` on the initial URL
-    alone would miss a 3xx that leaves the allowlist (e.g. to an internal/metadata
-    host). This fires before each hop is sent. `_check_host` keys only on the host,
-    so the key in `request.url`'s query string is never surfaced in the error.
-    """
-    _check_host(str(request.url))
-
-
-class _Bucket:
-    """Lock-free async token bucket: sustained `rate`/sec with bursts up to `burst`.
-
-    Lock-free on purpose — benign races only over/under-count by a token, which is
-    fine for rate-limiting, and it avoids binding an asyncio primitive to a loop
-    (so it's safe across multiple asyncio.run() calls).
-    """
-
-    def __init__(self, rate: float, burst: int):
-        self.rate = rate
-        self.cap = float(burst)
-        self.tokens = float(burst)
-        self.ts = time.monotonic()
-
-    async def take(self) -> None:
-        now = time.monotonic()
-        self.tokens = min(self.cap, self.tokens + (now - self.ts) * self.rate)
-        self.ts = now
-        if self.tokens < 1.0:
-            await asyncio.sleep((1.0 - self.tokens) / self.rate)
-            self.tokens = 0.0
-            self.ts = time.monotonic()
-        else:
-            self.tokens -= 1.0
-
-
-_BUCKETS = {host: _Bucket(rate, burst) for host, (rate, burst) in RATE_LIMITS.items()}
-
-
-async def _rate_limit(url: str) -> None:
-    """Wait for the per-host rate budget before a request (no-op for unlisted hosts)."""
-    bucket = _BUCKETS.get((urlsplit(url).hostname or "").lower())
-    if bucket is not None:
-        await bucket.take()
-
-
-def _retry_delay(resp, attempt: int) -> float:
-    """Seconds to wait before a retry: honor Retry-After (seconds), else backoff."""
-    ra = resp.headers.get("Retry-After") if resp is not None else None
-    if ra:
-        try:
-            return min(float(ra), RETRY_MAX_DELAY)
-        except (TypeError, ValueError):
-            pass
-    return min(RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.3),
-               RETRY_MAX_DELAY)
-
-
-async def _get_with_retry(client, url: str, params: dict, timeout: float):
-    """GET with bounded retry on 429/502/503/504 and timeouts (honors Retry-After).
-
-    Returns a status-checked response. On the final attempt a retryable status is
-    raised like any other HTTP error, so _handle_error can format it.
-    """
-    _check_host(url)
-    await _rate_limit(url)
-    for attempt in range(MAX_RETRIES + 1):
-        final = attempt == MAX_RETRIES
-        try:
-            resp = await client.get(url, params=params, timeout=timeout)
-        except httpx.TimeoutException:
-            if final:
-                raise
-            await asyncio.sleep(_retry_delay(None, attempt))
-            continue
-        if resp.status_code in RETRYABLE_STATUS and not final:
-            await asyncio.sleep(_retry_delay(resp, attempt))
-            continue
-        resp.raise_for_status()
-        return resp
-    raise RuntimeError("unreachable")  # pragma: no cover
-
-
-async def _steam_get(path: str, params: dict[str, Any], *, with_key: bool = True,
-                     cache_ttl: float = 0) -> dict:
-    """GET a Steam Web API endpoint and return parsed JSON.
-
-    Args:
-        path: Path after the host, e.g. "ISteamUser/GetFriendList/v1/".
-        params: Query parameters (the API key is injected automatically).
-        with_key: Whether to attach the configured API key.
-        cache_ttl: If > 0, cache the response for this many seconds. Use only for
-            static endpoints (e.g. game schemas); never for live/user data.
-    """
-    ck = _cache_key(API_BASE + "/" + path, params) if cache_ttl else None
-    if ck is not None:
-        hit = _CACHE.get(ck)
-        if hit is not None:
-            return hit
-    query = dict(params)
-    if with_key:
-        query["key"] = _get_api_key()
-    client = _http_client()
-    resp = await _get_with_retry(client, f"{API_BASE}/{path}", query, HTTP_TIMEOUT)
-    data = resp.json()
-    if ck is not None:
-        _CACHE.set(ck, data, cache_ttl)
-    return data
-
-
-async def _store_get(path: str, params: dict[str, Any], cache_ttl: float = 0) -> Any:
-    """GET a public storefront API endpoint (no key required)."""
-    return await _raw_get(f"{STORE_BASE}/{path}", params, cache_ttl=cache_ttl)
-
-
-async def _raw_get(url: str, params: dict[str, Any], cache_ttl: float = 0) -> Any:
-    """GET an arbitrary public Steam JSON endpoint (no key required)."""
-    ck = _cache_key(url, params) if cache_ttl else None
-    if ck is not None:
-        hit = _CACHE.get(ck)
-        if hit is not None:
-            return hit
-    client = _http_client()
-    resp = await _get_with_retry(client, url, params, HTTP_TIMEOUT)
-    data = resp.json()
-    if ck is not None:
-        _CACHE.set(ck, data, cache_ttl)
-    return data
-
 
 async def _deck_compat(appid: int, language: str = "english") -> Optional[dict]:
     """Steam Deck compatibility report for an app (no key, cached 24h).
@@ -462,153 +169,6 @@ async def _deck_compat(appid: int, language: str = "english") -> Optional[dict]:
     }
 
 
-async def _raw_get_text(url: str, params: dict[str, Any] | None = None,
-                        cache_ttl: float = 0) -> str:
-    """GET a public endpoint and return the raw text body (e.g. community XML)."""
-    params = params or {}
-    ck = _cache_key("text:" + url, params) if cache_ttl else None
-    if ck is not None:
-        hit = _CACHE.get(ck)
-        if hit is not None:
-            return hit
-    client = _http_client()
-    resp = await _get_with_retry(client, url, params, HTTP_TIMEOUT)
-    text = resp.text
-    if ck is not None:
-        _CACHE.set(ck, text, cache_ttl)
-    return text
-
-
-async def _steam_post(path: str, data: dict[str, Any], *, with_key: bool = False,
-                      cache_ttl: float = 0) -> dict:
-    """POST to a Steam Web API endpoint (some, e.g. GetPublishedFileDetails, are
-    POST-only) and return parsed JSON. Caches static responses like _steam_get."""
-    body = dict(data)
-    if with_key:
-        body["key"] = _get_api_key()
-    ck = _cache_key("post:" + API_BASE + "/" + path, body) if cache_ttl else None
-    if ck is not None:
-        hit = _CACHE.get(ck)
-        if hit is not None:
-            return hit
-    url = f"{API_BASE}/{path}"
-    _check_host(url)
-    await _rate_limit(url)
-    client = _http_client()
-    resp = await client.post(url, data=body, timeout=HTTP_TIMEOUT)
-    resp.raise_for_status()
-    out = resp.json()
-    if ck is not None:
-        _CACHE.set(ck, out, cache_ttl)
-    return out
-
-
-def _scrub(text: str) -> str:
-    """Redact a Steam Web API key (32 hex chars) from text — defense in depth so a
-    key can never leak through an error message."""
-    return re.sub(r"(?i)key=[0-9a-f]{32}", "key=***", text)
-
-
-def _handle_error(e: Exception) -> str:
-    """Consistent, actionable error formatting across all tools."""
-    if isinstance(e, SteamApiError):
-        return _scrub(f"Error: {e}")
-    if isinstance(e, httpx.HTTPStatusError):
-        code = e.response.status_code
-        if code == 401 or code == 403:
-            return (
-                "Error: Steam rejected the request (401/403). Your API key may be "
-                "invalid, or the target profile is private. Verify STEAM_API_KEY."
-            )
-        if code == 404:
-            return "Error: Not found (404). Check the SteamID / app ID is correct."
-        if code == 429:
-            return (
-                "Error: Rate limited by Steam (429). The Web API allows ~100,000 "
-                "calls/day per key. Wait and retry, or reduce request volume."
-            )
-        if code == 500:
-            return (
-                "Error: Steam returned 500. This often means the SteamID is invalid "
-                "or the profile/app has no data for this endpoint."
-            )
-        return f"Error: Steam API request failed with HTTP {code}."
-    if isinstance(e, httpx.TimeoutException):
-        return "Error: Request to Steam timed out. Please try again."
-    return _scrub(f"Error: Unexpected {type(e).__name__}: {e}")
-
-
-PRIVACY_SETTINGS_URL = "https://steamcommunity.com/my/edit/settings"
-
-
-def _privacy_hint(setting: str) -> str:
-    """Actionable hint naming the exact Steam privacy sub-setting to make Public.
-
-    Phrased to cover both 'this is my own profile' and someone else's — Steam
-    privacy is granular, so the fix is usually flipping one specific sub-setting.
-    """
-    return (
-        f"If it's your profile, set **{setting}** to Public in your Steam privacy "
-        f"settings ({PRIVACY_SETTINGS_URL}); another user's data is only readable "
-        f"if they've made it public."
-    )
-
-
-async def _resolve_steamid(identifier: Optional[str] = None) -> str:
-    """Resolve a flexible identifier to a 17-digit SteamID64.
-
-    Accepts:
-        - A raw SteamID64 (e.g. "76561197960287930")
-        - A vanity / custom-URL name (e.g. "gabelogannewell")
-        - A full profile URL (steamcommunity.com/id/<name> or /profiles/<id>)
-        - None / empty -> falls back to the configured STEAM_USER (default user)
-
-    Raises SteamApiError if a vanity name cannot be resolved, or if nothing was
-    given and no STEAM_USER is configured.
-    """
-    raw = (identifier or "").strip()
-    if not raw:
-        raw = _get_default_user()
-        if not raw:
-            raise SteamApiError(
-                "No SteamID provided and no default user configured. Pass a "
-                "steamid (SteamID64 / vanity name / profile URL), or set STEAM_USER "
-                "in your MCP client config to your own Steam name."
-            )
-
-    # Full profile URL?
-    m = PROFILE_URL_RE.search(raw)
-    if m:
-        kind, value = m.group(1).lower(), m.group(2)
-        if kind == "profiles":
-            # A /profiles/ URL must carry a 17-digit SteamID64. Validate before
-            # returning it (it flows into a community URL path downstream), so junk
-            # like "x@host" or path segments can't ride through as a "steamid".
-            if STEAMID64_RE.match(value):
-                return value
-            raise SteamApiError(
-                f"Malformed profile URL: /profiles/ must contain a 17-digit "
-                f"SteamID64, got {value!r}."
-            )
-        raw = value  # /id/<vanity> -> resolve the vanity below
-
-    # Already a SteamID64?
-    if STEAMID64_RE.match(raw):
-        return raw
-
-    # Otherwise treat as a vanity name and resolve it.
-    data = await _steam_get(
-        "ISteamUser/ResolveVanityURL/v1/", {"vanityurl": raw}
-    )
-    resp = data.get("response", {})
-    if resp.get("success") == 1 and resp.get("steamid"):
-        return resp["steamid"]
-    raise SteamApiError(
-        f"Could not resolve '{identifier}' to a SteamID. Provide a 17-digit "
-        f"SteamID64, an exact vanity name, or a full profile URL."
-    )
-
-
 async def _summaries_for(steamids: list[str]) -> dict[str, dict]:
     """Fetch player summaries for many SteamIDs, chunked at 100 per call.
 
@@ -624,70 +184,6 @@ async def _summaries_for(steamids: list[str]) -> dict[str, dict]:
         for p in data.get("response", {}).get("players", []):
             out[p["steamid"]] = p
     return out
-
-
-def _persona_label(player: dict) -> str:
-    """Human label for a player's current status, including current game."""
-    game = player.get("gameextrainfo")
-    if game:
-        return f"In-Game: {game}"
-    return PERSONA_STATES.get(player.get("personastate", 0), "Unknown")
-
-
-def _minutes_to_hours(minutes: Optional[int]) -> float:
-    return round((minutes or 0) / 60.0, 1)
-
-
-def _hours_str(minutes: Optional[int]) -> str:
-    """Display hours, but never render a *launched* game (>0 min) as a flat '0.0'.
-
-    A game played 1-5 minutes rounds to 0.0h, which looks like a contradiction next
-    to a 'played'/'abandoned' classification (those use playtime_forever > 0, not
-    the rounded hours). Show '<0.1' for launched-but-tiny playtime; 0 minutes stays
-    '0.0'.
-    """
-    m = minutes or 0
-    h = _minutes_to_hours(m)
-    return "<0.1" if m > 0 and h == 0 else f"{h}"
-
-
-def _dump(payload: Any) -> str:
-    return json.dumps(payload, indent=2, ensure_ascii=False)
-
-
-def _fmt_amount(amount: Optional[float], currency: Optional[str] = None) -> Optional[str]:
-    """Format a price with the right currency symbol.
-
-    `amount` is in major units (e.g. dollars — already divided by 100). Falls back
-    to "<amount> <CODE>" for currencies without a known symbol, and to "$" only
-    when no currency code is available at all.
-    """
-    if amount is None:
-        return None
-    if currency:
-        sym = CURRENCY_SYMBOLS.get(currency.upper())
-        if sym:
-            return f"{sym}{amount:,.2f}"
-        return f"{amount:,.2f} {currency.upper()}"
-    return f"${amount:,.2f}"
-
-
-FANOUT_LIMIT = 8  # max concurrent storefront lookups for fan-out tools
-
-
-async def _gather_limited(coros, limit: int = FANOUT_LIMIT):
-    """Await many coroutines with bounded concurrency, preserving input order.
-
-    Keeps fan-out tools (wishlist / DLC enrichment) fast without hammering the
-    storefront: at most `limit` requests are in flight at once.
-    """
-    sem = asyncio.Semaphore(limit)
-
-    async def _run(coro):
-        async with sem:
-            return await coro
-
-    return await asyncio.gather(*(_run(c) for c in coros))
 
 
 # ---------------------------------------------------------------------------
@@ -3722,64 +3218,6 @@ async def steam_compare_players(params: ComparePlayersInput) -> str:
 # ---------------------------------------------------------------------------
 # Helpers + library analysis
 # ---------------------------------------------------------------------------
-
-_STRIP_HTML_MAX = 20000  # cap raw input before the O(n^2) tag regexes (ReDoS guard)
-
-
-def _strip_html(s, limit: int = 600):
-    """Strip HTML tags/entities to readable plain text, truncated to `limit`."""
-    if not s:
-        return None
-    # `<[^>]+>` is quadratic on pathological input (a flood of unmatched '<'), and
-    # this runs on upstream Steam descriptions. The output is truncated to `limit`
-    # anyway, so cap the raw input first — 20k chars yields far more than any
-    # realistic `limit` of text, while bounding worst-case work to a constant.
-    if len(s) > _STRIP_HTML_MAX:
-        s = s[:_STRIP_HTML_MAX]
-    import html as _html
-    s = re.sub(r"<\s*br\s*/?>", " ", s)
-    s = re.sub(r"<[^>]+>", " ", s)
-    s = _html.unescape(s)
-    s = re.sub(r"\s+", " ", s).strip()
-    if not s:
-        return None
-    return (s[: limit - 1] + "…") if len(s) > limit else s
-
-
-def _parse_languages(html_str):
-    """Parse Steam's supported_languages HTML into (all, full_audio) name lists.
-
-    Steam marks full-audio languages with an asterisk, e.g.
-    'English<strong>*</strong>, French, German<br><strong>*</strong>languages...'.
-    """
-    if not html_str:
-        return [], []
-    head = re.split(r"<\s*br\s*/?>", html_str)[0]
-    out, audio = [], []
-    for seg in head.split(","):
-        full = "*" in seg
-        name = re.sub(r"<[^>]+>", "", seg).replace("*", "").strip()
-        if name:
-            out.append(name)
-            if full:
-                audio.append(name)
-    return out, audio
-
-
-def _ts_to_date(ts):
-    """Unix seconds -> 'YYYY-MM-DD'. None for missing/sentinel values (pre-2001).
-
-    Steam only began recording last-played timestamps ~2019; older plays carry a
-    tiny placeholder value, so anything before 2001 is treated as 'unknown'.
-    """
-    try:
-        if not ts or ts < 1_000_000_000:
-            return None
-        import datetime as _dt
-        return _dt.datetime.fromtimestamp(ts, _dt.timezone.utc).strftime("%Y-%m-%d")
-    except Exception:  # noqa: BLE001
-        return None
-
 
 # Beta/playtest/demo/test clients show up in GetOwnedGames as ordinary "games"
 # (often with real accrued playtime) but are frequently unlaunchable, so

@@ -11,6 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 import steam_mcp.server as S
+from steam_mcp import config, transport
 
 
 def run(coro):
@@ -94,27 +95,27 @@ def test_get_default_user_env(monkeypatch):
     monkeypatch.setenv("STEAM_USER", "76561197960287930")
     assert S._get_default_user() == "76561197960287930"
     monkeypatch.delenv("STEAM_USER", raising=False)
-    monkeypatch.setattr(S, "_dotenv_value", lambda name: "")
+    monkeypatch.setattr(config, "_dotenv_value", lambda name: "")
     assert S._get_default_user() == ""
 
 
 def test_resolve_steamid_defaults_to_steam_user(monkeypatch):
     # When no identifier is passed, fall back to the configured default user.
-    monkeypatch.setattr(S, "_get_default_user", lambda: "76561197960287930")
+    monkeypatch.setattr(config, "_get_default_user", lambda: "76561197960287930")
     assert run(S._resolve_steamid(None)) == "76561197960287930"
     assert run(S._resolve_steamid("")) == "76561197960287930"
     assert run(S._resolve_steamid("   ")) == "76561197960287930"
 
 
 def test_resolve_steamid_no_default_raises(monkeypatch):
-    monkeypatch.setattr(S, "_get_default_user", lambda: "")
+    monkeypatch.setattr(config, "_get_default_user", lambda: "")
     with pytest.raises(S.SteamApiError):
         run(S._resolve_steamid(None))
 
 
 def test_subject_tool_uses_default_user(monkeypatch):
     # A subject tool with the steamid omitted resolves to STEAM_USER end-to-end.
-    monkeypatch.setattr(S, "_get_default_user", lambda: "76561197960287930")
+    monkeypatch.setattr(config, "_get_default_user", lambda: "76561197960287930")
 
     async def fake_steam(path, params, **k):
         assert params.get("steamid") == "76561197960287930"
@@ -150,7 +151,7 @@ def test_ttl_cache_eviction():
 
 def test_get_api_key_missing(monkeypatch):
     monkeypatch.delenv("STEAM_API_KEY", raising=False)
-    monkeypatch.setattr(S, "_load_key_from_dotenv", lambda: "")
+    monkeypatch.setattr(config, "_load_key_from_dotenv", lambda: "")
     with pytest.raises(S.SteamApiError):
         S._get_api_key()
 
@@ -169,7 +170,7 @@ def test_store_get_caches(monkeypatch):
             calls["n"] += 1
             return FakeResp()
 
-    monkeypatch.setattr(S, "_http_client", lambda: FakeClient())
+    monkeypatch.setattr(transport, "_http_client", lambda: FakeClient())
     run(S._store_get("appdetails", {"appids": 1}, cache_ttl=60))
     run(S._store_get("appdetails", {"appids": 1}, cache_ttl=60))
     assert calls["n"] == 1                      # second served from cache
@@ -182,8 +183,8 @@ def test_http_client_rebinds_across_event_loops():
     # asyncio.run() creates a new loop, so the client must be recreated — otherwise
     # reuse raises "RuntimeError: Event loop is closed". Pre-fix this returned the
     # same client across loops (c1 == c2).
-    S._CLIENT = None
-    S._CLIENT_LOOP = None
+    transport._CLIENT = None
+    transport._CLIENT_LOOP = None
 
     async def grab():
         return id(S._http_client()), id(asyncio.get_running_loop())
@@ -192,8 +193,8 @@ def test_http_client_rebinds_across_event_loops():
     c2, l2 = run(grab())
     assert l1 != l2          # genuinely different event loops
     assert c1 != c2          # client was rebuilt for the new loop
-    S._CLIENT = None         # reset shared state for any later test
-    S._CLIENT_LOOP = None
+    transport._CLIENT = None         # reset shared state for any later test
+    transport._CLIENT_LOOP = None
 
 
 # --------------------------------------------------------------------------- #
@@ -536,7 +537,7 @@ def test_get_with_retry_succeeds_after_429(monkeypatch):
     async def no_sleep(*a, **k):
         return None
 
-    monkeypatch.setattr(S, "_http_client", lambda: FakeClient())
+    monkeypatch.setattr(transport, "_http_client", lambda: FakeClient())
     monkeypatch.setattr(S.asyncio, "sleep", no_sleep)
     data = run(S._raw_get("https://api.steampowered.com/x", {}))
     assert data == {"ok": True}
@@ -554,7 +555,7 @@ def test_get_with_retry_gives_up(monkeypatch):
     async def no_sleep(*a, **k):
         return None
 
-    monkeypatch.setattr(S, "_http_client", lambda: FakeClient())
+    monkeypatch.setattr(transport, "_http_client", lambda: FakeClient())
     monkeypatch.setattr(S.asyncio, "sleep", no_sleep)
     with pytest.raises(RuntimeError):
         run(S._raw_get("https://api.steampowered.com/x", {}))
