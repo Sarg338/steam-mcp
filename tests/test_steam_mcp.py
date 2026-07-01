@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 import steam_mcp.server as S
 from steam_mcp import config, transport
-from steam_mcp.data import pricing, tags
+from steam_mcp.data import catalog, players, pricing, tags
 
 
 def run(coro):
@@ -124,7 +124,7 @@ def test_subject_tool_uses_default_user(monkeypatch):
             {"appid": 440, "name": "Team Fortress 2",
              "playtime_forever": 120, "playtime_2weeks": 0}]}}
 
-    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(transport, "_steam_get", fake_steam)
     out = run(S.steam_get_owned_games(S.OwnedGamesInput()))
     assert "Team Fortress 2" in out
 
@@ -226,7 +226,7 @@ def test_discover_basic(monkeypatch):
         return {a: prices[a] for a in appids}
 
     monkeypatch.setattr(transport, "_raw_get", fake_raw)
-    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
+    monkeypatch.setattr(pricing, "_app_prices", fake_app_prices)
     out = run(S.steam_discover(S.DiscoverInput(term="x", response_format="json")))
     d = json.loads(out)
     assert d["total_count"] == 3 and d["count"] == 3
@@ -250,7 +250,7 @@ def test_discover_explicit_tags(monkeypatch):
 
     monkeypatch.setattr(tags, "_tag_name_map", fake_map)
     monkeypatch.setattr(transport, "_raw_get", fake_raw)
-    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
+    monkeypatch.setattr(pricing, "_app_prices", fake_app_prices)
     out = run(S.steam_discover(S.DiscoverInput(
         tags=["Souls-like"], max_price=20, on_sale=True, platform="win",
         response_format="json")))
@@ -294,7 +294,7 @@ def test_discover_personalized(monkeypatch):
     monkeypatch.setattr(transport, "_steam_get", fake_steam)
     monkeypatch.setattr(tags, "_tag_name_map", fake_map)
     monkeypatch.setattr(transport, "_raw_get", fake_raw)
-    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
+    monkeypatch.setattr(pricing, "_app_prices", fake_app_prices)
     out = run(S.steam_discover(S.DiscoverInput(
         steamid="76561197960287930", response_format="json")))
     d = json.loads(out)
@@ -340,10 +340,10 @@ def test_should_i_buy(monkeypatch):
     async def fake_map():
         return {1: "Action", 2: "Indie"}
 
-    monkeypatch.setattr(S, "_store_get", fake_store)
-    monkeypatch.setattr(S, "_raw_get", fake_raw)
-    monkeypatch.setattr(S, "_items_tags", fake_items)
-    monkeypatch.setattr(S, "_tag_name_map", fake_map)
+    monkeypatch.setattr(transport, "_store_get", fake_store)
+    monkeypatch.setattr(transport, "_raw_get", fake_raw)
+    monkeypatch.setattr(tags, "_items_tags", fake_items)
+    monkeypatch.setattr(tags, "_tag_name_map", fake_map)
     out = run(S.steam_should_i_buy(S.ShouldIBuyInput(appid=5, response_format="json")))
     d = json.loads(out)
     assert d["name"] == "Game5"
@@ -378,11 +378,11 @@ def test_recommend_seed(monkeypatch):
     async def fake_app_prices(appids, cc):
         return {a: {"name": f"G{a}"} for a in appids}
 
-    monkeypatch.setattr(S, "_tag_name_map", fake_map)
-    monkeypatch.setattr(S, "_items_tags", fake_items)
-    monkeypatch.setattr(S, "_discover_appids", fake_discover)
-    monkeypatch.setattr(S, "_app_price", fake_app_price)
-    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
+    monkeypatch.setattr(tags, "_tag_name_map", fake_map)
+    monkeypatch.setattr(tags, "_items_tags", fake_items)
+    monkeypatch.setattr(catalog, "_discover_appids", fake_discover)
+    monkeypatch.setattr(pricing, "_app_price", fake_app_price)
+    monkeypatch.setattr(pricing, "_app_prices", fake_app_prices)
     out = run(S.steam_recommend(S.RecommendInput(seed_appid=100, response_format="json")))
     d = json.loads(out)
     assert d["basis"] == "like G100"
@@ -434,7 +434,6 @@ def test_plan_coop_night(monkeypatch):
                 for x in ij["ids"] if x["appid"] in meta]}}
         return {}
 
-    monkeypatch.setattr(S, "_steam_get", fake_steam)
     monkeypatch.setattr(transport, "_steam_get", fake_steam)
     out = run(S.steam_plan_coop_night(
         S.PlanCoopNightInput(steamid=host, response_format="json")))
@@ -478,7 +477,7 @@ def test_resource_app_reads(monkeypatch):
         return {"570": {"success": True,
                         "data": {"name": "Dota 2", "type": "game", "is_free": True}}}
 
-    monkeypatch.setattr(S, "_store_get", fake_store)
+    monkeypatch.setattr(transport, "_store_get", fake_store)
     parts = list(run(S.mcp.read_resource("steam://app/570")))
     text = " ".join(str(getattr(p, "content", p)) for p in parts)
     assert "Dota 2" in text
@@ -491,7 +490,7 @@ def test_app_details_language(monkeypatch):
         captured.update(params)
         return {"5": {"success": True, "data": {"name": "G", "type": "game"}}}
 
-    monkeypatch.setattr(S, "_store_get", fake_store)
+    monkeypatch.setattr(transport, "_store_get", fake_store)
     run(S.steam_get_app_details(S.AppDetailsInput(appid=5, language="french")))
     assert captured.get("l") == "french"
 
@@ -505,7 +504,7 @@ def test_app_reviews_language(monkeypatch):
             "review_score_desc": "x", "total_positive": 1,
             "total_negative": 0, "total_reviews": 1}}
 
-    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(transport, "_raw_get", fake_raw)
     run(S.steam_get_app_reviews(S.AppReviewsInput(appid=1, language="german")))
     assert captured.get("language") == "german"
 
@@ -578,7 +577,7 @@ def test_regional_pricing(monkeypatch):
     async def fake_app_price(appid, cc):
         return prices[cc]
 
-    monkeypatch.setattr(S, "_app_price", fake_app_price)
+    monkeypatch.setattr(pricing, "_app_price", fake_app_price)
     out = run(S.steam_get_app_regional_pricing(S.RegionalPricingInput(
         appid=5, countries=["us", "de", "br"], response_format="json")))
     d = json.loads(out)
@@ -599,7 +598,7 @@ def test_workshop_item(monkeypatch):
             "views": 2772323, "file_size": 1215506,
             "time_created": 1547052076, "time_updated": 0, "banned": 0}]}}
 
-    monkeypatch.setattr(S, "_steam_post", fake_post)
+    monkeypatch.setattr(transport, "_steam_post", fake_post)
     out = run(S.steam_get_workshop_item(
         S.WorkshopItemInput(published_file_id=1619685021, response_format="json")))
     d = json.loads(out)
@@ -614,7 +613,7 @@ def test_workshop_item_not_found(monkeypatch):
     async def fake_post(path, data, **k):
         return {"response": {"publishedfiledetails": [{"result": 9}]}}
 
-    monkeypatch.setattr(S, "_steam_post", fake_post)
+    monkeypatch.setattr(transport, "_steam_post", fake_post)
     out = run(S.steam_get_workshop_item(S.WorkshopItemInput(published_file_id=1)))
     assert "No Workshop item found" in out
 
@@ -637,8 +636,8 @@ def test_user_groups(monkeypatch):
         gid = url.split("/gid/")[1].split("/")[0]
         return xmls[gid]
 
-    monkeypatch.setattr(S, "_steam_get", fake_steam)
-    monkeypatch.setattr(S, "_raw_get_text", fake_text)
+    monkeypatch.setattr(transport, "_steam_get", fake_steam)
+    monkeypatch.setattr(transport, "_raw_get_text", fake_text)
     out = run(S.steam_get_user_groups(
         S.UserGroupsInput(steamid="76561197960287930", response_format="json")))
     d = json.loads(out)
@@ -666,7 +665,7 @@ def test_inventory(monkeypatch):
                     {"classid": "b", "instanceid": "0", "market_name": "Emoticon",
                      "type": "Emoticon", "tradable": 1, "marketable": 0}]}
 
-    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(transport, "_raw_get", fake_raw)
     out = run(S.steam_get_inventory(
         S.InventoryInput(steamid="76561197960287930", response_format="json")))
     d = json.loads(out)
@@ -687,7 +686,7 @@ def test_inventory_private(monkeypatch):
     async def fake_raw(url, params, cache_ttl=0):
         return None                                   # community endpoint: private/empty
 
-    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(transport, "_raw_get", fake_raw)
     out = run(S.steam_get_inventory(S.InventoryInput(steamid="76561197960287930")))
     # Privacy-aware message: names the Inventory setting + points to the fix.
     assert "Inventory" in out and "public" in out.lower()
@@ -726,7 +725,7 @@ def test_market_price(monkeypatch):
                  "asset_description": {"type": "Classified Rifle"}}]}
         return {}
 
-    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(transport, "_raw_get", fake_raw)
     out = run(S.steam_get_market_price(S.MarketPriceInput(
         appid=730, market_hash_name="AK-47 | Redline (Field-Tested)",
         response_format="json")))
@@ -742,7 +741,7 @@ def test_market_price_unavailable(monkeypatch):
     async def fake_raw(url, params, cache_ttl=0):
         return {"success": True}      # priceoverview with no listings; search empty
 
-    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(transport, "_raw_get", fake_raw)
     out = run(S.steam_get_market_price(S.MarketPriceInput(
         appid=730, market_hash_name="Nonexistent Item")))
     assert "no current" in out.lower()
@@ -868,7 +867,7 @@ def test_analyze_library(monkeypatch):
     async def fake_steam(path, params, **k):
         return payload
 
-    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(transport, "_steam_get", fake_steam)
     out = run(S.steam_analyze_library(
         S.LibraryAnalysisInput(steamid="76561197960287930", response_format="json")))
     d = json.loads(out)
@@ -891,7 +890,7 @@ def test_analyze_library_backlog_truncation(monkeypatch):
     async def fake_steam(path, params, **k):
         return payload
 
-    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(transport, "_steam_get", fake_steam)
 
     # Truncated: ask for 3 of 5 -> alphabetical slice A,B,C + truncation flag.
     out = run(S.steam_analyze_library(S.LibraryAnalysisInput(
@@ -932,7 +931,7 @@ def test_analyze_library_abandoned_decoupled(monkeypatch):
     async def fake_steam(path, params, **k):
         return payload
 
-    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(transport, "_steam_get", fake_steam)
 
     def abandoned_count(**kw):
         out = run(S.steam_analyze_library(S.LibraryAnalysisInput(
@@ -979,7 +978,7 @@ def test_analyze_library_abandoned_sort(monkeypatch):
     async def fake_steam(path, params, **k):
         return payload
 
-    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(transport, "_steam_get", fake_steam)
 
     def order(**kw):
         out = run(S.steam_analyze_library(S.LibraryAnalysisInput(
@@ -1058,7 +1057,7 @@ def test_analyze_library_excludes_temp_clients(monkeypatch):
     async def fake_steam(path, params, **k):
         return payload
 
-    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(transport, "_steam_get", fake_steam)
 
     # Default: temp clients dropped from counts and every list.
     d = json.loads(run(S.steam_analyze_library(S.LibraryAnalysisInput(
@@ -1107,7 +1106,7 @@ def test_analyze_library_tiny_playtime_render(monkeypatch):
     async def fake_steam(path, params, **k):
         return payload
 
-    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(transport, "_steam_get", fake_steam)
 
     d = json.loads(run(S.steam_analyze_library(S.LibraryAnalysisInput(
         steamid="76561197960287930", stale_days=365, response_format="json"))))
@@ -1139,8 +1138,8 @@ def test_analyze_library_persona_header(monkeypatch):
     async def persona_ok(ids):
         return {sid: {"personaname": "Sarg338"}}
 
-    monkeypatch.setattr(S, "_steam_get", fake_steam)
-    monkeypatch.setattr(S, "_summaries_for", persona_ok)
+    monkeypatch.setattr(transport, "_steam_get", fake_steam)
+    monkeypatch.setattr(players, "_summaries_for", persona_ok)
 
     # ISSUE-8: header shows persona (sid), not a bare SteamID64.
     md = run(S.steam_analyze_library(S.LibraryAnalysisInput(steamid=sid)))
@@ -1156,14 +1155,14 @@ def test_analyze_library_persona_header(monkeypatch):
     # Persona unavailable -> fall back to the bare SteamID (no parens).
     async def persona_empty(ids):
         return {}
-    monkeypatch.setattr(S, "_summaries_for", persona_empty)
+    monkeypatch.setattr(players, "_summaries_for", persona_empty)
     md2 = run(S.steam_analyze_library(S.LibraryAnalysisInput(steamid=sid)))
     assert md2.split("\n")[0] == f"# Library analysis for {sid}"
 
     # Persona lookup failure must not break the analysis (best-effort).
     async def persona_boom(ids):
         raise RuntimeError("network")
-    monkeypatch.setattr(S, "_summaries_for", persona_boom)
+    monkeypatch.setattr(players, "_summaries_for", persona_boom)
     md3 = run(S.steam_analyze_library(S.LibraryAnalysisInput(steamid=sid)))
     assert md3.split("\n")[0] == f"# Library analysis for {sid}"
 
@@ -1220,9 +1219,9 @@ def test_coop_night_excludes_temp_clients(monkeypatch):
             2: {"name": "Some Game Playtest", "coop": True},
         }
 
-    monkeypatch.setattr(S, "_summaries_for", fake_summaries)
-    monkeypatch.setattr(S, "_owned_set", fake_owned_set)
-    monkeypatch.setattr(S, "_items_coop", fake_items_coop)
+    monkeypatch.setattr(players, "_summaries_for", fake_summaries)
+    monkeypatch.setattr(players, "_owned_set", fake_owned_set)
+    monkeypatch.setattr(catalog, "_items_coop", fake_items_coop)
 
     d = json.loads(run(S.steam_plan_coop_night(S.PlanCoopNightInput(
         steamid=host, friends=[friend], response_format="json"))))
@@ -1261,12 +1260,12 @@ def test_coop_night_new_mode(monkeypatch):
         return {a: {"name": nm.get(a), "price": "$19.99",
                     "on_sale": False, "discount_pct": 0} for a in appids}
 
-    monkeypatch.setattr(S, "_summaries_for", fake_summaries)
-    monkeypatch.setattr(S, "_owned_set", fake_owned_set)
-    monkeypatch.setattr(S, "_resolve_tag_ids", fake_resolve_tags)
-    monkeypatch.setattr(S, "_discover_appids", fake_discover)
-    monkeypatch.setattr(S, "_items_coop", fake_items_coop)
-    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
+    monkeypatch.setattr(players, "_summaries_for", fake_summaries)
+    monkeypatch.setattr(players, "_owned_set", fake_owned_set)
+    monkeypatch.setattr(tags, "_resolve_tag_ids", fake_resolve_tags)
+    monkeypatch.setattr(catalog, "_discover_appids", fake_discover)
+    monkeypatch.setattr(catalog, "_items_coop", fake_items_coop)
+    monkeypatch.setattr(pricing, "_app_prices", fake_app_prices)
 
     d = json.loads(run(S.steam_plan_coop_night(S.PlanCoopNightInput(
         steamid=host, friends=[friend], mode="new", response_format="json"))))
@@ -1301,8 +1300,8 @@ def test_app_details_features(monkeypatch):
     async def fake_deck(appid, language="english"):
         return {"category": 3, "label": "Verified", "items": [], "blog_url": None}
 
-    monkeypatch.setattr(S, "_store_get", fake_store)
-    monkeypatch.setattr(S, "_deck_compat", fake_deck)  # hermetic + assert below
+    monkeypatch.setattr(transport, "_store_get", fake_store)
+    monkeypatch.setattr(catalog, "_deck_compat", fake_deck)  # hermetic + assert below
     out = run(S.steam_get_app_details(
         S.AppDetailsInput(appid=123, response_format="json")))
     d = json.loads(out)
@@ -1402,7 +1401,7 @@ def test_discover_released_within_days(monkeypatch):
         return {a: {"name": f"G{a}", "release_ts": int(rel[a])} for a in appids}
 
     monkeypatch.setattr(transport, "_raw_get", fake_raw)
-    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
+    monkeypatch.setattr(pricing, "_app_prices", fake_app_prices)
     d = json.loads(run(S.steam_discover(S.DiscoverInput(
         released_within_days=30, response_format="json"))))
     assert [r["appid"] for r in d["results"]] == [1, 3]   # 200-day-old #2 dropped
@@ -1422,8 +1421,8 @@ def test_wishlist_on_sale_filter(monkeypatch):
     async def fake_app_prices(appids, cc):
         return {a: prices[a] for a in appids}
 
-    monkeypatch.setattr(S, "_steam_get", fake_steam)
-    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
+    monkeypatch.setattr(transport, "_steam_get", fake_steam)
+    monkeypatch.setattr(pricing, "_app_prices", fake_app_prices)
     out = run(S.steam_get_wishlist(
         S.WishlistInput(steamid="76561197960287930", on_sale_only=True,
                         response_format="json")))
@@ -1455,7 +1454,7 @@ def test_compare_players(monkeypatch):
                      {"appid": 3, "name": "OnlyB", "playtime_forever": 60}]
         return {"response": {"games": games}}
 
-    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(transport, "_steam_get", fake_steam)
     out = run(S.steam_compare_players(
         S.ComparePlayersInput(steamid_a=a, steamid_b=b, response_format="json")))
     d = json.loads(out)
@@ -1482,7 +1481,7 @@ def test_app_reviews_recent_window(monkeypatch):
             ], "cursor": "*"}
         return base
 
-    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(transport, "_raw_get", fake_raw)
     out = run(S.steam_get_app_reviews(
         S.AppReviewsInput(appid=1, review_filter="recent", limit=0,
                           response_format="json")))
@@ -1518,7 +1517,7 @@ def test_search_apps_currency(monkeypatch):
         return {"items": [
             {"id": 7, "name": "Game7", "price": {"currency": "EUR", "final": 1999}}]}
 
-    monkeypatch.setattr(S, "_store_get", fake_store)
+    monkeypatch.setattr(transport, "_store_get", fake_store)
     out = run(S.steam_search_apps(S.AppSearchInput(query="g", country_code="de")))
     assert "€19.99" in out and "$" not in out
 
@@ -1529,7 +1528,7 @@ def test_featured_specials_currency(monkeypatch):
             {"id": 5, "name": "Deal", "original_price": 1999, "final_price": 999,
              "discount_percent": 50, "currency": "GBP"}]}}
 
-    monkeypatch.setattr(S, "_fetch_featured", fake_fetch)
+    monkeypatch.setattr(pricing, "_fetch_featured", fake_fetch)
     out = run(S.steam_get_featured_specials(S.FeaturedInput(country_code="gb")))
     assert "£9.99" in out and "£19.99" in out and "$" not in out
 
@@ -1542,7 +1541,7 @@ def test_package_details_currency(monkeypatch):
                       "discount_percent": 50},
             "apps": [{"name": "A"}, {"name": "B"}]}}}
 
-    monkeypatch.setattr(S, "_store_get", fake_store)
+    monkeypatch.setattr(transport, "_store_get", fake_store)
     out = run(S.steam_get_package_details(
         S.PackageDetailsInput(packageid=55, country_code="gb")))
     assert "£15.00" in out and "£30.00" in out and "$" not in out
@@ -1563,8 +1562,8 @@ def test_get_dlc(monkeypatch):
     async def fake_app_prices(appids, cc):
         return {a: prices[a] for a in appids}
 
-    monkeypatch.setattr(S, "_store_get", fake_store)
-    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
+    monkeypatch.setattr(transport, "_store_get", fake_store)
+    monkeypatch.setattr(pricing, "_app_prices", fake_app_prices)
 
     out = run(S.steam_get_dlc(S.DlcInput(appid=100, response_format="json")))
     d = json.loads(out)
@@ -1582,7 +1581,7 @@ def test_get_dlc_none(monkeypatch):
     async def fake_store(path, params, cache_ttl=0):
         return {"100": {"success": True, "data": {"name": "Base", "dlc": []}}}
 
-    monkeypatch.setattr(S, "_store_get", fake_store)
+    monkeypatch.setattr(transport, "_store_get", fake_store)
     out = run(S.steam_get_dlc(S.DlcInput(appid=100)))
     assert "no listed DLC" in out
 
@@ -1592,7 +1591,7 @@ def test_user_game_stats(monkeypatch):
         return {"playerstats": {"gameName": "TF2", "stats": [
             {"name": "kills", "value": 100}, {"name": "deaths", "value": 50}]}}
 
-    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(transport, "_steam_get", fake_steam)
     out = run(S.steam_get_user_game_stats(
         S.PlayerGameInput(steamid="76561197960287930", appid=440,
                           response_format="json")))
@@ -1605,7 +1604,7 @@ def test_user_game_stats_empty(monkeypatch):
     async def fake_steam(path, params, **k):
         return {"playerstats": {"gameName": "X", "stats": []}}
 
-    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(transport, "_steam_get", fake_steam)
     out = run(S.steam_get_user_game_stats(
         S.PlayerGameInput(steamid="76561197960287930", appid=1)))
     assert "No stats available" in out
@@ -1652,7 +1651,7 @@ def test_get_app_tags(monkeypatch):
     async def fake_raw(url, params, cache_ttl=0):
         return [{"tagid": 10, "name": "Roguelike"}, {"tagid": 20, "name": "Co-op"}]
 
-    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(transport, "_steam_get", fake_steam)
     monkeypatch.setattr(transport, "_raw_get", fake_raw)
     out = run(S.steam_get_app_tags(S.AppTagsInput(appid=1, response_format="json")))
     d = json.loads(out)
@@ -1673,7 +1672,7 @@ def test_rarest_unlocks(monkeypatch):
         return {"achievementpercentages": {"achievements": [
             {"name": "A", "percent": 5.0}, {"name": "B", "percent": 80.0}]}}
 
-    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(transport, "_steam_get", fake_steam)
     out = run(S.steam_get_rarest_unlocks(
         S.RarestUnlocksInput(steamid="76561197960287930", appid=1,
                              response_format="json")))
@@ -1705,9 +1704,8 @@ def test_friends_who_own(monkeypatch):
     async def fake_app_price(appid, cc):
         return {"name": "Counter-Strike 2"}
 
-    monkeypatch.setattr(S, "_steam_get", fake_steam)
     monkeypatch.setattr(transport, "_steam_get", fake_steam)
-    monkeypatch.setattr(S, "_app_price", fake_app_price)
+    monkeypatch.setattr(pricing, "_app_price", fake_app_price)
     out = run(S.steam_find_friends_who_own(
         S.FriendsWhoOwnInput(steamid="76561197960287930", appid=730,
                              response_format="json")))

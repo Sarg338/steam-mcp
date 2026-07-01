@@ -36,6 +36,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import steam_mcp.server as S  # noqa: E402
+from steam_mcp import transport  # noqa: E402
+from steam_mcp.data import players  # noqa: E402
 from steam_mcp.server import mcp  # noqa: E402
 
 # --- Budgets (fail the audit if exceeded) -------------------------------------
@@ -85,15 +87,15 @@ def audit_definitions() -> dict:
 # --- Part 2: worst-case response sizes ----------------------------------------
 
 @contextlib.contextmanager
-def _patch(**attrs):
-    old = {k: getattr(S, k) for k in attrs}
+def _patch(module, **attrs):
+    old = {k: getattr(module, k) for k in attrs}
     for k, v in attrs.items():
-        setattr(S, k, v)
+        setattr(module, k, v)
     try:
         yield
     finally:
         for k, v in old.items():
-            setattr(S, k, v)
+            setattr(module, k, v)
 
 
 def _games(n: int, never_frac: float = 0.5) -> list:
@@ -136,7 +138,8 @@ def _scenarios() -> list:
     out = []
 
     # 1. analyze_library at max backlog + abandoned (the heaviest tool).
-    with _patch(_steam_get=fake_owned, _summaries_for=fake_sum):
+    with _patch(transport, _steam_get=fake_owned), \
+         _patch(players, _summaries_for=fake_sum):
         res = {}
         for fmt in ("markdown", "json"):
             res[fmt] = _run_tool(S.steam_analyze_library, S.LibraryAnalysisInput(
@@ -145,7 +148,7 @@ def _scenarios() -> list:
         out.append(("steam_analyze_library (200 games, limits maxed)", res))
 
     # 2. get_owned_games at limit=200.
-    with _patch(_steam_get=fake_owned_played):
+    with _patch(transport, _steam_get=fake_owned_played):
         res = {}
         for fmt in ("markdown", "json"):
             res[fmt] = _run_tool(S.steam_get_owned_games, S.OwnedGamesInput(
@@ -153,7 +156,7 @@ def _scenarios() -> list:
         out.append(("steam_get_owned_games (limit=200)", res))
 
     # 3. compare_players at limit=100 (both libraries fully shared).
-    with _patch(_steam_get=fake_owned_played):
+    with _patch(transport, _steam_get=fake_owned_played):
         res = {}
         for fmt in ("markdown", "json"):
             res[fmt] = _run_tool(S.steam_compare_players, S.ComparePlayersInput(
