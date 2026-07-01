@@ -4,6 +4,18 @@ A concise, one-line-per-change history. Versions follow
 [Semantic Versioning](https://semver.org/). Releases:
 <https://github.com/Sarg338/steam-mcp/releases>
 
+## [1.12.0]
+- Internal restructure: the single 5,400-line `server.py` is now a package (transport / cache / errors / identity / render, `data/` services, ten `tools/` domain modules, `prompts.py`, `resources.py`). Zero wire-surface change — tool names, schemas, and descriptions are byte-identical, now guarded by a golden-snapshot test.
+- `steam_discover` + `released_within_days` now honors your chosen `sort` instead of forcing newest-first: the window is enumerated newest-first (up to the 300 newest matches), then re-ranked client-side — by review score with a volume guard by default, so brand-new unreviewed releases no longer bury well-reviewed recent games. Results gain `review_pct`/`review_count` (parsed from the search page, no extra requests) and windowed queries report `window_coverage: full|partial`.
+- `steam_recommend` with BOTH `seed_appid` and `steamid` ("games like X that I don't own") now anchors on the seed game's tags; the steamid supplies the ownership exclusion (previously the user's taste silently overrode the seed).
+- `excluded_owned` in discover/recommend now reports how many matches were actually hidden, not the size of your library.
+
+## [1.11.2]
+- `server.json` description shortened to <=100 chars for the MCP Registry. No code change.
+
+## [1.11.1]
+- Version bump to publish the updated `server.json` description. No code change.
+
 ## [1.11.0]
 - New optional `STEAM_USER` config (set it next to your API key to your Steam vanity name / ID / profile URL). The "about me" tools — library, owned games, achievements, wishlist, friends, inventory, level, bans, badges, groups, co-op night, compare — now default to you when you omit the `steamid`, so you don't have to paste your ID every time. Passing a `steamid` still overrides. The keyless game-finders (discover / should_i_buy / recommend) keep personalization explicit.
 
