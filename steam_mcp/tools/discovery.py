@@ -23,6 +23,42 @@ _SORT_MAP = {
     "relevance": "",
 }
 
+# Release-window search: Steam has no server-side "released after" filter, so the
+# window is enumerated newest-first (Released_DESC) page by page and then re-ranked
+# client-side by the requested sort. These bound that enumeration so a broad
+# window over a popular tag pool can't trigger unbounded requests.
+_WINDOW_PAGE_SIZE = 100
+_WINDOW_MAX_PAGES = 3          # up to 300 newest matches considered
+# Review ranking guard: a fresh release with a handful of glowing reviews should
+# not outrank an established 90%-positive game, and unreviewed games rank last.
+_MIN_RANKED_REVIEWS = 10
+
+
+def _rank_window(rows: list[dict], sort: str) -> list[dict]:
+    """Order window candidates by the requested sort, client-side.
+
+    'reviews': games with >= _MIN_RANKED_REVIEWS reviews first (by percent, then
+    volume), then thinly-reviewed ones, then unreviewed. 'release' keeps
+    newest-first. Price sorts use the numeric price when known (unknown last);
+    'relevance' keeps Steam's newest-first enumeration order.
+    """
+    if sort == "reviews":
+        def key(r):
+            n = r.get("review_count") or 0
+            tier = 0 if n >= _MIN_RANKED_REVIEWS else (1 if n else 2)
+            return (tier, -(r.get("review_pct") or 0), -n)
+        return sorted(rows, key=key)
+    if sort == "release":
+        return sorted(rows, key=lambda r: -(r.get("release_ts") or 0))
+    if sort in ("price_asc", "price_desc"):
+        sign = 1 if sort == "price_asc" else -1
+        return sorted(
+            rows,
+            key=lambda r: (r.get("price_cents") is None,
+                           sign * (r.get("price_cents") or 0)),
+        )
+    return rows  # relevance: keep enumeration order
+
 
 class DiscoverInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
@@ -66,8 +102,9 @@ class DiscoverInput(BaseModel):
     )
     released_within_days: Optional[int] = Field(
         default=None, ge=1, le=3650,
-        description="Only include games released in the last N days (forces "
-        "newest-first). Use for 'what came out recently'. Omit for any release date.",
+        description="Only include games released in the last N days, ranked by "
+        "your chosen `sort` (default: best-reviewed). Use for 'what came out "
+        "recently'. Omit for any release date.",
     )
     limit: int = Field(
         default=15, description="Max results to return (1-50).", ge=1, le=50
@@ -156,34 +193,79 @@ async def steam_discover(params: DiscoverInput) -> str:
             query["specials"] = 1
         if params.platform:
             query["os"] = params.platform
-        sort_by = _SORT_MAP.get(params.sort, "Reviews_DESC")
-        if params.released_within_days:
-            sort_by = "Released_DESC"  # a release window is inherently newest-first
-        if sort_by:
-            query["sort_by"] = sort_by
-
-        appids, total = await catalog._discover_appids(query)
-        appids = [a for a in appids if a not in owned_ids]
-        page = appids[: params.limit]
-        pm = await pricing._app_prices(page, cc) if page else {}
-        infos = [pm.get(a, {}) for a in page]
-        cutoff = (time.time() - params.released_within_days * 86400
-                  if params.released_within_days else None)
-        rows = []
-        for a, info in zip(page, infos, strict=True):
-            if cutoff is not None:
-                rts = info.get("release_ts")
-                if not rts or rts < cutoff:
-                    continue  # released before the window, or release date unknown
-            rows.append({
+        def _row(meta: dict, info: dict) -> dict:
+            a = meta["appid"]
+            return {
                 "appid": a,
                 "name": info.get("name") or f"app {a}",
                 "price": info.get("price"),
                 "discount_pct": info.get("discount_pct", 0),
                 "on_sale": info.get("on_sale", False),
-            })
+                "review_pct": meta.get("review_pct"),
+                "review_count": meta.get("review_count") or 0,
+            }
 
-        excluded = len(owned_ids) if (params.steamid and params.exclude_owned) else 0
+        window = params.released_within_days
+        excluded = 0
+        coverage = None
+        if not window:
+            # No release window: Steam's own server-side ordering is authoritative.
+            sort_by = _SORT_MAP.get(params.sort, "Reviews_DESC")
+            if sort_by:
+                query["sort_by"] = sort_by
+            found, total = await catalog._discover_search(query)
+            excluded = sum(1 for r in found if r["appid"] in owned_ids)
+            kept = [r for r in found if r["appid"] not in owned_ids]
+            page = kept[: params.limit]
+            pm = await pricing._app_prices([r["appid"] for r in page], cc) if page else {}
+            rows = [_row(r, pm.get(r["appid"], {})) for r in page]
+        else:
+            # Release window: Steam can't filter by date server-side, so enumerate
+            # the window newest-first (Released_DESC guarantees everything inside
+            # the window precedes everything outside it), then re-rank client-side
+            # by the requested sort — "well-reviewed AND recent" must not collapse
+            # into "newest".
+            query["sort_by"] = "Released_DESC"
+            cutoff = time.time() - window * 86400
+            candidates: list[dict] = []
+            seen: set[int] = set()   # pages can drift/overlap while Steam re-ranks
+            total = 0
+            coverage = "full"
+            for page_no in range(_WINDOW_MAX_PAGES):
+                q = dict(query, start=page_no * _WINDOW_PAGE_SIZE,
+                         count=_WINDOW_PAGE_SIZE)
+                found, page_total = await catalog._discover_search(q)
+                if page_total:
+                    total = page_total
+                if not found:
+                    break
+                pm = await pricing._app_prices([r["appid"] for r in found], cc)
+                past_window = False
+                for r in found:
+                    if r["appid"] in seen:
+                        continue
+                    seen.add(r["appid"])
+                    info = pm.get(r["appid"], {})
+                    rts = info.get("release_ts")
+                    if not rts:
+                        continue  # release date unknown: can't confirm the window
+                    if rts < cutoff:
+                        past_window = True  # newest-first => the rest are older
+                        continue
+                    if r["appid"] in owned_ids:
+                        excluded += 1
+                        continue
+                    candidates.append({**_row(r, info),
+                                       "price_cents": info.get("price_cents"),
+                                       "release_ts": rts})
+                if past_window or len(found) < _WINDOW_PAGE_SIZE:
+                    break
+            else:
+                coverage = "partial"  # page cap hit while still inside the window
+            ranked = _rank_window(candidates, params.sort)
+            rows = [{k: v for k, v in r.items()
+                     if k not in ("price_cents", "release_ts")}
+                    for r in ranked[: params.limit]]
         if params.response_format == ResponseFormat.JSON:
             return render._dump({
                 "filters": {
@@ -203,6 +285,7 @@ async def steam_discover(params: DiscoverInput) -> str:
                 "excluded_owned": excluded,
                 "total_count": total,
                 "count": len(rows),
+                **({"window_coverage": coverage} if window else {}),
                 "results": rows,
             })
 
@@ -220,10 +303,15 @@ async def steam_discover(params: DiscoverInput) -> str:
         lines = [
             f"# Discover: {', '.join(bits) if bits else 'top games'}",
             f"Matched {total:,} games; showing {len(rows)}"
-            + (f" released in the last {params.released_within_days} days "
-               "(newest first)." if params.released_within_days
-               else f" (sorted by {params.sort})."),
+            + (f" released in the last {window} days" if window else "")
+            + f" (sorted by {params.sort}).",
         ]
+        if coverage == "partial":
+            lines.append(
+                f"(ranked the {_WINDOW_MAX_PAGES * _WINDOW_PAGE_SIZE} newest "
+                "matches — the window may contain more; narrow the filters or "
+                "the window for full coverage)"
+            )
         if params.steamid and seed_games:
             extra = f" -> tags: {', '.join(taste_tags)}" if taste_tags else ""
             lines.append(
@@ -241,6 +329,8 @@ async def steam_discover(params: DiscoverInput) -> str:
                 tail = f" - {r['price']}"
             else:
                 tail = ""
+            if r["review_count"]:
+                tail += f" - {r['review_pct']}% positive ({r['review_count']:,} reviews)"
             lines.append(f"- **{r['name']}** (appid {r['appid']}){tail}")
         if not rows:
             lines.append("(no matches — try loosening the filters)")

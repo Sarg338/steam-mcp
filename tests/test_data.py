@@ -124,3 +124,39 @@ def test_app_prices_batch_and_fallback(monkeypatch):
     assert pm[11]["is_free"] and pm[11]["price"] == "Free"
     assert pm[11]["release_ts"] is None         # no release block -> None
     assert pm[12]["name"] == "Fallback"   # came from the single-item fallback
+
+
+def test_discover_search_parses_review_summaries(monkeypatch):
+    # Rows as the store search renders them: a tooltip with "N% of the M user
+    # reviews" when reviewed, a bare/no_reviews span otherwise. Duplicate appids
+    # are collapsed, and a null total_count falls back to the row count instead
+    # of crashing downstream formatting.
+    html = (
+        '<a href="x" data-ds-appid="10"><span class="search_review_summary positive"'
+        ' data-tooltip-html="Very Positive&lt;br&gt;92% of the 15,632 user reviews'
+        ' for this game are positive."></span></a>'
+        '<a href="x" data-ds-appid="20"><span class="search_review_summary'
+        ' no_reviews"></span></a>'
+        '<a href="x" data-ds-appid="10"></a>'
+    )
+
+    async def fake_raw(url, params, cache_ttl=0):
+        return {"success": 1, "total_count": None, "results_html": html}
+
+    monkeypatch.setattr(transport, "_raw_get", fake_raw)
+    rows, total = run(catalog._discover_search({}))
+    assert rows == [
+        {"appid": 10, "review_pct": 92, "review_count": 15632},
+        {"appid": 20, "review_pct": None, "review_count": 0},
+    ]
+    assert total == 2
+
+
+def test_discover_appids_wrapper(monkeypatch):
+    async def fake_raw(url, params, cache_ttl=0):
+        return {"success": 1, "total_count": 7,
+                "results_html": '<a data-ds-appid="5"></a><a data-ds-appid="6"></a>'}
+
+    monkeypatch.setattr(transport, "_raw_get", fake_raw)
+    ids, total = run(catalog._discover_appids({}))
+    assert ids == [5, 6] and total == 7

@@ -92,26 +92,56 @@ def _is_temp_client(name: str) -> bool:
 
 SEARCH_URL = "https://store.steampowered.com/search/results/"
 
+# Review summary as rendered in each search-result row's tooltip, e.g.
+# "Very Positive<br>92% of the 15,632 user reviews for this game are positive."
+# (the <br> may arrive entity-escaped inside the attribute). Bounded patterns.
+_SEARCH_REVIEW_RE = re.compile(r"(\d{1,3})% of the ([\d,]{1,15}) user reviews")
 
-async def _discover_appids(query: dict) -> tuple[list[int], int]:
-    """Run the storefront search; return (ranked_appids, total_count).
+
+async def _discover_search(query: dict) -> tuple[list[dict], int]:
+    """Run the storefront search; return (ranked result rows, total_count).
 
     The store search returns rendered HTML, so we pull the ranked app IDs from the
-    stable `data-ds-appid` attribute on each result row. Guarded: an empty/garbled
-    response simply yields no IDs.
+    stable `data-ds-appid` attribute on each result row — plus, when the row
+    carries a `search_review_summary` tooltip, the lifetime review percentage and
+    count, so callers can re-rank client-side without extra requests. Each row is
+    {"appid", "review_pct" (int|None), "review_count" (int)}. Guarded: an
+    empty/garbled response simply yields no rows; a row with no/unparseable
+    review summary gets review_pct=None, review_count=0.
     """
     data = await transport._raw_get(SEARCH_URL, query, cache_ttl=CACHE_TTL_DISCOVER)
     if not isinstance(data, dict):
         return [], 0
     html = data.get("results_html") or ""
-    ids: list[int] = []
+    matches = list(re.finditer(r'data-ds-appid="(\d+)', html))
+    rows: list[dict] = []
     seen = set()
-    for m in re.finditer(r'data-ds-appid="(\d+)', html):
+    for i, m in enumerate(matches):
         a = int(m.group(1))
-        if a not in seen:
-            seen.add(a)
-            ids.append(a)
-    return ids, data.get("total_count", len(ids))
+        if a in seen:
+            continue
+        seen.add(a)
+        # The review tooltip sits between this row's anchor and the next row's.
+        # Cap the slice so a pathological payload can't feed the regex unbounded.
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(html)
+        segment = html[m.start():min(end, m.start() + 8000)]
+        pct: int | None = None
+        count = 0
+        rm = _SEARCH_REVIEW_RE.search(segment)
+        if rm:
+            try:
+                pct = int(rm.group(1))
+                count = int(rm.group(2).replace(",", ""))
+            except ValueError:
+                pct, count = None, 0
+        rows.append({"appid": a, "review_pct": pct, "review_count": count})
+    return rows, (data.get("total_count") or len(rows))
+
+
+async def _discover_appids(query: dict) -> tuple[list[int], int]:
+    """Back-compat wrapper over `_discover_search`: (ranked_appids, total_count)."""
+    rows, total = await _discover_search(query)
+    return [r["appid"] for r in rows], total
 
 
 async def _items_coop(appids: list[int]) -> dict:

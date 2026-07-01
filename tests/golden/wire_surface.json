@@ -358,7 +358,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Only include games released in the last N days (forces newest-first). Use for 'what came out recently'. Omit for any release date.",
+                "description": "Only include games released in the last N days, ranked by your chosen `sort` (default: best-reviewed). Use for 'what came out recently'. Omit for any release date.",
                 "title": "Released Within Days"
               },
               "response_format": {

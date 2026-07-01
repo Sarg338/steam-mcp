@@ -35,11 +35,16 @@ async def _app_price(appid: int, cc: str) -> dict:
         price = d.get("price_overview") or {}
         is_free = d.get("is_free", False)
         disc = price.get("discount_percent", 0) or 0
+        try:
+            cents = 0 if is_free else int(price.get("final"))
+        except (TypeError, ValueError):
+            cents = None
         return {
             "appid": appid,
             "name": d.get("name"),
             "is_free": is_free,
             "price": price.get("final_formatted") or ("Free" if is_free else None),
+            "price_cents": cents,
             "discount_pct": disc,
             "on_sale": disc > 0,
         }
@@ -87,9 +92,14 @@ async def _app_prices(appids: list[int], cc: str = "us") -> dict[int, dict]:
                 rts = int((it.get("release") or {}).get("steam_release_date"))
             except (TypeError, ValueError):
                 rts = None
+            try:
+                cents = 0 if is_free else int(bpo.get("final_price_in_cents"))
+            except (TypeError, ValueError):
+                cents = None
             res[aid] = {
                 "appid": aid, "name": it.get("name"), "is_free": is_free,
-                "price": price, "discount_pct": disc, "on_sale": disc > 0,
+                "price": price, "price_cents": cents,
+                "discount_pct": disc, "on_sale": disc > 0,
                 "release_ts": rts,
             }
         return res
