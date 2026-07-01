@@ -35,10 +35,21 @@ import sys
 # Make the package importable whether or not it's pip-installed.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import steam_mcp.server as S  # noqa: E402
 from steam_mcp import transport  # noqa: E402
 from steam_mcp.data import players  # noqa: E402
+# Importing steam_mcp.server registers every tool/prompt/resource AND runs
+# _compact_descriptions(), so `mcp` below exposes the real wire descriptions.
 from steam_mcp.server import mcp  # noqa: E402
+from steam_mcp.tools.friends import (  # noqa: E402
+    ComparePlayersInput,
+    steam_compare_players,
+)
+from steam_mcp.tools.library import (  # noqa: E402
+    LibraryAnalysisInput,
+    OwnedGamesInput,
+    steam_analyze_library,
+    steam_get_owned_games,
+)
 
 # --- Budgets (fail the audit if exceeded) -------------------------------------
 # Baselined to the current footprint plus modest headroom. The defs total is
@@ -142,7 +153,7 @@ def _scenarios() -> list:
          _patch(players, _summaries_for=fake_sum):
         res = {}
         for fmt in ("markdown", "json"):
-            res[fmt] = _run_tool(S.steam_analyze_library, S.LibraryAnalysisInput(
+            res[fmt] = _run_tool(steam_analyze_library, LibraryAnalysisInput(
                 steamid="76561197960287930", backlog_limit=100,
                 abandoned_limit=100, response_format=fmt))
         out.append(("steam_analyze_library (200 games, limits maxed)", res))
@@ -151,7 +162,7 @@ def _scenarios() -> list:
     with _patch(transport, _steam_get=fake_owned_played):
         res = {}
         for fmt in ("markdown", "json"):
-            res[fmt] = _run_tool(S.steam_get_owned_games, S.OwnedGamesInput(
+            res[fmt] = _run_tool(steam_get_owned_games, OwnedGamesInput(
                 steamid="76561197960287930", limit=200, response_format=fmt))
         out.append(("steam_get_owned_games (limit=200)", res))
 
@@ -159,7 +170,7 @@ def _scenarios() -> list:
     with _patch(transport, _steam_get=fake_owned_played):
         res = {}
         for fmt in ("markdown", "json"):
-            res[fmt] = _run_tool(S.steam_compare_players, S.ComparePlayersInput(
+            res[fmt] = _run_tool(steam_compare_players, ComparePlayersInput(
                 steamid_a="76561197960287930", steamid_b="76561197960287931",
                 limit=100, response_format=fmt))
         out.append(("steam_compare_players (limit=100)", res))
