@@ -181,8 +181,9 @@ class RecommendInput(BaseModel):
     )
     steamid: Optional[str] = Field(
         default=None, max_length=200,
-        description="Recommend from this user's taste (most-played + recent); also "
-        "excludes games they already own. SteamID64, vanity, or profile URL.",
+        description="Excludes games this user already owns; seeds the tags from "
+        "their taste (most-played + recent) only when no seed_appid/tags are "
+        "given. SteamID64, vanity, or profile URL.",
     )
     tags: list[str] = Field(
         default_factory=list, max_length=10,
@@ -210,10 +211,12 @@ async def steam_recommend(params: RecommendInput) -> str:
     """Recommend games similar to a seed game ("like Hades") or to a user's taste, explaining the shared tags; for "games like X" / "what should I play" (for filtered search use steam_discover).
 
     Pick a basis: a seed_appid ("games like Hades"), a steamid (your most-played +
-    recent taste), or explicit tags. Finds well-reviewed games that share those
-    tags — excluding the seed game and (with steamid) games you already own — and
-    explains WHY each matches (the shared tags). The store search needs no key;
-    steamid personalization does.
+    recent taste), or explicit tags — precedence tags > seed_appid > taste. Pass
+    BOTH seed_appid and steamid for "games like X that I don't own": the seed
+    drives the tags and the steamid supplies the ownership exclusion. Finds
+    well-reviewed games that share those tags — excluding the seed game and (with
+    steamid) games you already own — and explains WHY each matches (the shared
+    tags). The store search needs no key; steamid personalization does.
 
     Args:
         params (RecommendInput): seed_appid, steamid, tags, max_price, limit, cc.
@@ -230,18 +233,14 @@ async def steam_recommend(params: RecommendInput) -> str:
         exclude: set = set()
         owned_ids: set = set()
 
+        # Basis precedence: explicit tags > seed game > taste. A steamid ALWAYS
+        # contributes the ownership exclusion, but only seeds the tags when
+        # neither tags nor seed_appid were given — "games like X that I don't
+        # own" must anchor on X, not on the user's most-played genres.
         if params.tags:
             seed_ids, _ = await tags._resolve_tag_ids(params.tags)
             filter_ids = seed_ids[:]
             basis = "tags: " + ", ".join(params.tags)
-        if params.steamid:
-            sid = await identity._resolve_steamid(params.steamid)
-            taste = await tags._taste_profile(sid)
-            owned_ids = {a for a in taste["owned_ids"] if a}
-            if not seed_ids and taste["tag_ids"]:
-                seed_ids = taste["tag_ids"]
-                filter_ids = seed_ids[:3]
-                basis = "your taste (" + ", ".join(taste["seed_games"][:3]) + ")"
         if not seed_ids and params.seed_appid:
             tmap = await tags._items_tags([params.seed_appid])
             for t in (tmap.get(params.seed_appid, []) or [])[:10]:
@@ -253,6 +252,14 @@ async def steam_recommend(params: RecommendInput) -> str:
             info = await pricing._app_price(params.seed_appid, cc)
             basis = "like " + (info.get("name") or f"app {params.seed_appid}")
             exclude.add(params.seed_appid)
+        if params.steamid:
+            sid = await identity._resolve_steamid(params.steamid)
+            taste = await tags._taste_profile(sid)
+            owned_ids = {a for a in taste["owned_ids"] if a}
+            if not seed_ids and taste["tag_ids"]:
+                seed_ids = taste["tag_ids"]
+                filter_ids = seed_ids[:3]
+                basis = "your taste (" + ", ".join(taste["seed_games"][:3]) + ")"
 
         if not seed_ids:
             return ("Provide a basis: seed_appid (games like X), steamid (your "
@@ -267,6 +274,7 @@ async def steam_recommend(params: RecommendInput) -> str:
         if params.max_price is not None:
             query["maxprice"] = str(params.max_price)
         cand, _ = await catalog._discover_appids(query)
+        excluded_owned = sum(1 for a in cand if a in owned_ids)
         cand = [a for a in cand if a not in exclude][:40]
         if not cand:
             return "No recommendations found — try fewer/different tags or a higher price."
@@ -299,10 +307,11 @@ async def steam_recommend(params: RecommendInput) -> str:
             })
 
         if params.response_format == ResponseFormat.JSON:
-            return render._dump({"basis": basis, "excluded_owned": len(owned_ids),
+            return render._dump({"basis": basis, "excluded_owned": excluded_owned,
                           "count": len(rows), "recommendations": rows})
 
-        owned_note = f", excluding {len(owned_ids)} you own" if owned_ids else ""
+        owned_note = (f", excluding {excluded_owned} you own"
+                      if excluded_owned else "")
         lines = [f"# Recommendations — {basis}", f"{len(rows)} games{owned_note}:", ""]
         for r in rows:
             why = f" — matches: {', '.join(r['matching_tags'])}" if r["matching_tags"] else ""

@@ -3066,7 +3066,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Recommend from this user's taste (most-played + recent); also excludes games they already own. SteamID64, vanity, or profile URL.",
+                "description": "Excludes games this user already owns; seeds the tags from their taste (most-played + recent) only when no seed_appid/tags are given. SteamID64, vanity, or profile URL.",
                 "title": "Steamid"
               },
               "tags": {

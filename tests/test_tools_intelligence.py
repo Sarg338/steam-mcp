@@ -3,7 +3,7 @@ import json
 
 from conftest import run
 
-from steam_mcp import transport
+from steam_mcp import identity, transport
 from steam_mcp.data import catalog, players, pricing, tags
 from steam_mcp.tools.intelligence import (
     PlanCoopNightInput,
@@ -100,6 +100,57 @@ def test_recommend_seed(monkeypatch):
 def test_recommend_requires_basis():
     out = run(steam_recommend(RecommendInput()))
     assert "Provide a basis" in out
+
+
+def test_recommend_seed_beats_taste(monkeypatch):
+    # "Games like X that I don't own": seed_appid + steamid together must anchor
+    # the tags on the SEED game (not the user's most-played taste) while the
+    # steamid still supplies the ownership exclusion. Regression for the basis
+    # precedence running taste before seed.
+    async def fake_resolve(identifier=None):
+        return "76561197960287930"
+
+    async def fake_taste(sid, **kw):
+        # A taste wildly unlike the seed: competitive-multiplayer tags, owns 40.
+        return {"owned_ids": {40, 999}, "seed_games": ["CS2", "Dota 2"],
+                "tag_ids": [7, 8], "tag_names": ["FPS", "MOBA"]}
+
+    async def fake_map():
+        return {1: "Metroidvania", 2: "Souls-like", 7: "FPS", 8: "MOBA"}
+
+    async def fake_items(appids):
+        m = {100: [{"tagid": 1, "weight": 99}, {"tagid": 2, "weight": 50}],  # seed
+             20: [{"tagid": 1, "weight": 10}, {"tagid": 2, "weight": 5}],
+             30: [{"tagid": 1, "weight": 8}],
+             40: [{"tagid": 1, "weight": 7}, {"tagid": 2, "weight": 6}]}     # owned
+        return {a: m.get(a, []) for a in appids}
+
+    captured = {}
+
+    async def fake_discover(query):
+        captured.update(query)
+        return [20, 30, 40], 3
+
+    async def fake_app_price(a, cc):
+        return {"name": f"G{a}"}
+
+    async def fake_app_prices(appids, cc):
+        return {a: {"name": f"G{a}"} for a in appids}
+
+    monkeypatch.setattr(identity, "_resolve_steamid", fake_resolve)
+    monkeypatch.setattr(tags, "_taste_profile", fake_taste)
+    monkeypatch.setattr(tags, "_tag_name_map", fake_map)
+    monkeypatch.setattr(tags, "_items_tags", fake_items)
+    monkeypatch.setattr(catalog, "_discover_appids", fake_discover)
+    monkeypatch.setattr(pricing, "_app_price", fake_app_price)
+    monkeypatch.setattr(pricing, "_app_prices", fake_app_prices)
+    d = json.loads(run(steam_recommend(RecommendInput(
+        seed_appid=100, steamid="sarg", response_format="json"))))
+    assert d["basis"] == "like G100"                      # seed wins, not taste
+    assert captured["tags"] == "1,2"                      # search filtered by SEED tags
+    ids = [r["appid"] for r in d["recommendations"]]
+    assert ids == [20, 30]                                # owned 40 excluded, seed absent
+    assert d["excluded_owned"] == 1                       # 40 dropped; library size is 2
 
 
 def test_plan_coop_night(monkeypatch):
