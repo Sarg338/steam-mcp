@@ -39,6 +39,11 @@ def test_excerpt_never_exceeds_its_limit():
     assert len(out) == 280 and out.endswith("…")       # over it: capped, not 281
     assert len(S._excerpt("x" * 5000)) == 280
     assert S._excerpt("abcdef", limit=3) == "ab…"
+    # Multi-byte text: the cap counts characters, not bytes. Live Korean and
+    # Japanese review excerpts come back at 280 chars / 660-818 bytes.
+    ko = S._excerpt("가" * 400)
+    assert len(ko) == 280 and ko.endswith("…")
+    assert len(ko.encode("utf-8")) == 840   # 279 hangul x 3 bytes + the ellipsis
 
 
 def test_review_excerpt_respects_the_cap():
@@ -730,16 +735,26 @@ ENGLISH_CATS = [
     {"id": 38, "description": "Online Co-op"},
     {"id": 23, "description": "Steam Cloud"},
 ]
+# A non-Latin script exercises the same path with nothing an English substring
+# match could latch onto by accident, and round-trips multi-byte text through
+# the response. Steam's language name for Korean is "koreana", not "korean".
+KOREAN_CATS = [
+    {"id": 2, "description": "싱글 플레이어"},
+    {"id": 9, "description": "협동"},
+    {"id": 38, "description": "온라인 협동"},
+    {"id": 23, "description": "Steam 클라우드"},
+]
 
 
 async def _none():
     return None
 
 
-def _app_details_store(calls, english_cats=ENGLISH_CATS):
+def _app_details_store(calls, english_cats=ENGLISH_CATS,
+                       localized_cats=LOCALIZED_CATS):
     async def fake_store(path, params, cache_ttl=0):
         calls.append(params.get("l"))
-        cats = english_cats if params.get("l") == "english" else LOCALIZED_CATS
+        cats = english_cats if params.get("l") == "english" else localized_cats
         return {"5": {"success": True,
                       "data": {"name": "G", "type": "game", "categories": cats}}}
     return fake_store
@@ -767,6 +782,33 @@ def test_app_details_features_survive_a_localized_response(monkeypatch):
         S.AppDetailsInput(appid=5, language="french")))
     assert "Un joueur, Coop, Coop en ligne" in text
     assert "Steam Cloud (nuage)" not in text     # a feature, not a play mode
+
+
+def test_app_details_features_survive_a_non_latin_response(monkeypatch):
+    """Same defect in a non-Latin script, where no English substring could match
+    by accident. Verified live against CS2 / Stardew Valley / Elden Ring in
+    koreana, japanese, russian, thai and tchinese."""
+    calls = []
+    monkeypatch.setattr(S, "_store_get",
+                        _app_details_store(calls, localized_cats=KOREAN_CATS))
+    monkeypatch.setattr(S, "_deck_compat", lambda *a, **k: _none())
+    out = run(S.steam_get_app_details(
+        S.AppDetailsInput(appid=5, language="koreana", response_format="json")))
+    d = json.loads(out)
+
+    assert d["features"]["is_singleplayer"] is True
+    assert d["features"]["is_coop"] is True
+    assert d["features"]["is_online_coop"] is True
+    assert d["features"]["has_cloud_saves"] is True
+    # Hangul comes back intact, not escaped or transliterated.
+    assert d["categories"] == [c["description"] for c in KOREAN_CATS]
+    assert calls == ["koreana", "english"]
+
+    calls.clear()
+    text = run(S.steam_get_app_details(
+        S.AppDetailsInput(appid=5, language="koreana")))
+    assert "싱글 플레이어, 협동, 온라인 협동" in text
+    assert "Steam 클라우드" not in text   # a feature, not a play mode
 
 
 def test_app_details_features_skip_the_english_lookup_for_english(monkeypatch):
