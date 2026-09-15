@@ -703,15 +703,17 @@ def test_resource_app_reads(monkeypatch):
 
 
 def test_app_details_language(monkeypatch):
-    captured = {}
+    seen = []
 
     async def fake_store(path, params, cache_ttl=0):
-        captured.update(params)
+        seen.append(params.get("l"))
         return {"5": {"success": True, "data": {"name": "G", "type": "game"}}}
 
     monkeypatch.setattr(S, "_store_get", fake_store)
     run(S.steam_get_app_details(S.AppDetailsInput(appid=5, language="french")))
-    assert captured.get("l") == "french"
+    # The caller's own request is in their language; the follow-up that reads
+    # the fields Steam localizes away is deliberately English.
+    assert seen == ["french", "english"]
 
 
 # Feature flags match English category names. A localized response must not turn
@@ -792,6 +794,68 @@ def test_app_details_survives_a_failed_english_lookup(monkeypatch):
     # Best-effort: the tool still answers, with the pre-fix detection quality.
     assert d["name"] == "G"
     assert d["categories"] == [c["description"] for c in LOCALIZED_CATS]
+
+
+def _achievement_store(calls, localized_cats, english_cats, total=42):
+    """appdetails where only the English payload carries the achievement count.
+
+    Verified live 2026-09: CS2, TF2 and Elden Ring all report
+    `achievements.total` as 0 in German while English reports 1 / 520 / 42.
+    """
+    async def fake_store(path, params, cache_ttl=0):
+        english = params.get("l") == "english"
+        calls.append(params.get("l"))
+        return {"5": {"success": True, "data": {
+            "name": "G", "type": "game",
+            "categories": english_cats if english else localized_cats,
+            "achievements": {"total": total if english else 0},
+        }}}
+    return fake_store
+
+
+def test_app_details_reads_the_achievement_count_in_english(monkeypatch):
+    """An app with achievements but no "Steam Achievements" category (CS2's
+    shape) has only the count to go on — and the count is 0 in any language."""
+    calls = []
+    monkeypatch.setattr(S, "_store_get", _achievement_store(
+        calls,
+        [{"id": 1, "description": "Mehrspieler"}],
+        [{"id": 1, "description": "Multi-player"}],
+    ))
+    monkeypatch.setattr(S, "_deck_compat", lambda *a, **k: _none())
+    out = run(S.steam_get_app_details(
+        S.AppDetailsInput(appid=5, language="german", response_format="json")))
+    d = json.loads(out)
+    assert d["achievements_total"] == 42
+    assert d["features"]["has_achievements"] is True
+    assert calls == ["german", "english"]
+
+
+def test_app_details_keeps_a_genuine_zero_for_english(monkeypatch):
+    """The English payload is authoritative for an English caller: no second
+    lookup, and an app that really has no achievements still says so."""
+    calls = []
+    monkeypatch.setattr(S, "_store_get", _achievement_store(
+        calls, LOCALIZED_CATS, ENGLISH_CATS, total=0))
+    monkeypatch.setattr(S, "_deck_compat", lambda *a, **k: _none())
+    out = run(S.steam_get_app_details(
+        S.AppDetailsInput(appid=5, response_format="json")))
+    d = json.loads(out)
+    assert d["achievements_total"] == 0
+    assert d["features"]["has_achievements"] is False
+    assert calls == ["english"]
+
+
+def test_app_details_looks_up_english_without_categories(monkeypatch):
+    """No categories is not a reason to skip the lookup: the achievement count
+    still needs it."""
+    calls = []
+    monkeypatch.setattr(S, "_store_get", _achievement_store(calls, [], []))
+    monkeypatch.setattr(S, "_deck_compat", lambda *a, **k: _none())
+    out = run(S.steam_get_app_details(
+        S.AppDetailsInput(appid=5, language="german", response_format="json")))
+    assert json.loads(out)["achievements_total"] == 42
+    assert calls == ["german", "english"]
 
 
 def test_app_reviews_language(monkeypatch):
