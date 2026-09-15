@@ -2082,9 +2082,11 @@ def test_tool_descriptions_are_trimmed_to_one_line():
 def test_version_is_in_sync_across_metadata():
     import pathlib
     root = pathlib.Path(__file__).resolve().parent.parent
-    assert f'version = "{S.__version__}"' in (root / "pyproject.toml").read_text()
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+    assert f'version = "{S.__version__}"' in pyproject
     for name in ("server.json", "manifest.json"):
-        assert f'"version": "{S.__version__}"' in (root / name).read_text(), name
+        text = (root / name).read_text(encoding="utf-8")
+        assert f'"version": "{S.__version__}"' in text, name
 
 
 def test_cache_hint_methods_are_all_cacheable():
@@ -2460,7 +2462,12 @@ def test_readme_key_column_matches_the_code():
     of the same fact. Drift means the docs promise something the server denies."""
     import pathlib
 
-    readme = (pathlib.Path(__file__).resolve().parent.parent / "README.md").read_text()
+    # encoding pinned: the table's "yes†" marker is UTF-8, and read_text()
+    # would otherwise decode it through the platform codepage (cp1252 on
+    # Windows), dropping that row from the parse.
+    readme = (pathlib.Path(__file__).resolve().parent.parent / "README.md").read_text(
+        encoding="utf-8"
+    )
     rows = re.findall(r"^\| `(steam_\w+)` \|.*\| (no\*|no|yes†|yes) \|$", readme, re.M)
     assert len(rows) == 37, f"parsed {len(rows)} tool rows, expected 37"
     for name, marker in rows:
