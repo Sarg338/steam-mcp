@@ -505,6 +505,86 @@ def test_app_details_language(monkeypatch):
     assert captured.get("l") == "french"
 
 
+# Feature flags match English category names. A localized response must not turn
+# them all off, and the categories the caller sees must stay in their language.
+LOCALIZED_CATS = [
+    {"id": 2, "description": "Un joueur"},
+    {"id": 9, "description": "Coop"},
+    {"id": 38, "description": "Coop en ligne"},
+    {"id": 23, "description": "Steam Cloud (nuage)"},
+]
+ENGLISH_CATS = [
+    {"id": 2, "description": "Single-player"},
+    {"id": 9, "description": "Co-op"},
+    {"id": 38, "description": "Online Co-op"},
+    {"id": 23, "description": "Steam Cloud"},
+]
+
+
+async def _none():
+    return None
+
+
+def _app_details_store(calls, english_cats=ENGLISH_CATS):
+    async def fake_store(path, params, cache_ttl=0):
+        calls.append(params.get("l"))
+        cats = english_cats if params.get("l") == "english" else LOCALIZED_CATS
+        return {"5": {"success": True,
+                      "data": {"name": "G", "type": "game", "categories": cats}}}
+    return fake_store
+
+
+def test_app_details_features_survive_a_localized_response(monkeypatch):
+    calls = []
+    monkeypatch.setattr(S, "_store_get", _app_details_store(calls))
+    monkeypatch.setattr(S, "_deck_compat", lambda *a, **k: _none())
+    out = run(S.steam_get_app_details(
+        S.AppDetailsInput(appid=5, language="french", response_format="json")))
+    d = json.loads(out)
+
+    assert d["features"]["is_singleplayer"] is True
+    assert d["features"]["is_coop"] is True
+    assert d["features"]["is_online_coop"] is True
+    assert d["features"]["has_cloud_saves"] is True
+    # Display stays in the caller's language.
+    assert d["categories"] == [c["description"] for c in LOCALIZED_CATS]
+    assert calls == ["french", "english"]
+
+    # Same for the markdown play-mode line: detected in English, shown localized.
+    calls.clear()
+    text = run(S.steam_get_app_details(
+        S.AppDetailsInput(appid=5, language="french")))
+    assert "Un joueur, Coop, Coop en ligne" in text
+    assert "Steam Cloud (nuage)" not in text     # a feature, not a play mode
+
+
+def test_app_details_features_skip_the_english_lookup_for_english(monkeypatch):
+    calls = []
+    monkeypatch.setattr(S, "_store_get", _app_details_store(calls))
+    monkeypatch.setattr(S, "_deck_compat", lambda *a, **k: _none())
+    out = run(S.steam_get_app_details(
+        S.AppDetailsInput(appid=5, response_format="json")))
+    assert json.loads(out)["features"]["is_coop"] is True
+    assert calls == ["english"]        # no second round trip
+
+
+def test_app_details_survives_a_failed_english_lookup(monkeypatch):
+    async def fake_store(path, params, cache_ttl=0):
+        if params.get("l") == "english":
+            raise RuntimeError("upstream down")
+        return {"5": {"success": True, "data": {
+            "name": "G", "type": "game", "categories": LOCALIZED_CATS}}}
+
+    monkeypatch.setattr(S, "_store_get", fake_store)
+    monkeypatch.setattr(S, "_deck_compat", lambda *a, **k: _none())
+    out = run(S.steam_get_app_details(
+        S.AppDetailsInput(appid=5, language="french", response_format="json")))
+    d = json.loads(out)
+    # Best-effort: the tool still answers, with the pre-fix detection quality.
+    assert d["name"] == "G"
+    assert d["categories"] == [c["description"] for c in LOCALIZED_CATS]
+
+
 def test_app_reviews_language(monkeypatch):
     captured = {}
 
@@ -1692,6 +1772,42 @@ def test_rarest_unlocks(monkeypatch):
     assert d["unlocked_count"] == 2
     assert d["rarest"][0]["name"] == "Ach A"        # 5% rarer than 80%
     assert d["rarest"][0]["global_pct"] == 5.0
+
+
+def test_global_achievement_percentages_tolerate_string_percents(monkeypatch):
+    async def fake_steam(path, params, **k):
+        return {"achievementpercentages": {"achievements": [
+            {"name": "A", "percent": "80.126"},     # string, not a number
+            {"name": "B", "percent": 5.0},
+            {"name": "C"},                          # absent entirely
+            {"name": "D", "percent": None}]}}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    out = run(S.steam_get_global_achievement_percentages(
+        S.AppOnlyInput(appid=1, response_format="json")))
+    rows = json.loads(out)["achievements"]
+    assert [r["global_pct"] for r in rows] == [0.0, 0.0, 5.0, 80.13]
+    assert {r["api_name"] for r in rows} == {"A", "B", "C", "D"}
+
+
+def test_rarest_unlocks_tolerates_string_percents(monkeypatch):
+    async def fake_steam(path, params, **k):
+        if "GetPlayerAchievements" in path:
+            return {"playerstats": {"success": True, "gameName": "G", "achievements": [
+                {"apiname": "A", "name": "Ach A", "achieved": 1, "unlocktime": 1700000000},
+                {"apiname": "B", "name": "Ach B", "achieved": 1, "unlocktime": 1700000000},
+                {"apiname": "C", "name": "Ach C", "achieved": 1, "unlocktime": 1700000000}]}}
+        return {"achievementpercentages": {"achievements": [
+            {"name": "A", "percent": "5.0"},        # string
+            {"name": "B", "percent": 80.0},
+            {"name": "C", "percent": "n/a"}]}}      # unparseable -> unknown
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    out = run(S.steam_get_rarest_unlocks(
+        S.RarestUnlocksInput(steamid="76561197960287930", appid=1,
+                             response_format="json")))
+    d = json.loads(out)
+    assert [r["global_pct"] for r in d["rarest"]] == [5.0, 80.0, None]
 
 
 def test_friends_who_own(monkeypatch):
