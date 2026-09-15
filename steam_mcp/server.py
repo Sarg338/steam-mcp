@@ -3169,7 +3169,7 @@ def _fmt_review(r: dict) -> dict:
             (r.get("author") or {}).get("playtime_forever")
         ),
         "timestamp_created": r.get("timestamp_created"),
-        "excerpt": (text[:280] + "…") if len(text) > 280 else text,
+        "excerpt": _excerpt(text),
     }
 
 
@@ -3757,7 +3757,7 @@ async def steam_get_app_news(params: AppNewsInput) -> str:
                     "date": it.get("date"),
                     "feed": it.get("feedlabel"),
                     "url": it.get("url"),
-                    "excerpt": (body[:280] + "…") if len(body) > 280 else body,
+                    "excerpt": _excerpt(body),
                 }
             )
         if not rows:
@@ -4076,6 +4076,16 @@ async def steam_compare_players(params: ComparePlayersInput) -> str:
 # ---------------------------------------------------------------------------
 
 _STRIP_HTML_MAX = 20000  # cap raw input before the O(n^2) tag regexes (ReDoS guard)
+
+
+def _excerpt(text: str, limit: int = 280) -> str:
+    """Shorten `text` to at most `limit` characters, ellipsis included.
+
+    The ellipsis replaces a character rather than riding past the cap, so a
+    truncated excerpt is exactly `limit` long and never one over — same
+    convention as _strip_html.
+    """
+    return (text[: limit - 1] + "…") if len(text) > limit else text
 
 
 def _strip_html(s, limit: int = 600):

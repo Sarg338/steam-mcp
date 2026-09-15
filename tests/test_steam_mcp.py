@@ -31,6 +31,20 @@ def test_strip_html():
     assert len(out) == 50 and out.endswith("…")
 
 
+def test_excerpt_never_exceeds_its_limit():
+    assert S._excerpt("x" * 279) == "x" * 279          # under the cap: untouched
+    assert S._excerpt("x" * 280) == "x" * 280          # exactly at it: untouched
+    out = S._excerpt("x" * 281)
+    assert len(out) == 280 and out.endswith("…")       # over it: capped, not 281
+    assert len(S._excerpt("x" * 5000)) == 280
+    assert S._excerpt("abcdef", limit=3) == "ab…"
+
+
+def test_review_excerpt_respects_the_cap():
+    review = S._fmt_review({"review": "y" * 400, "votes_up": 1, "voted_up": True})
+    assert len(review["excerpt"]) == 280 and review["excerpt"].endswith("…")
+
+
 def test_parse_languages():
     a, au = S._parse_languages(
         "English<strong>*</strong>, French, German<br><strong>*</strong>full audio"
