@@ -735,6 +735,40 @@ async def _deck_compat(appid: int, language: str = "english") -> Optional[dict]:
     }
 
 
+async def _english_category_names(
+    appid: int, country_code: str, language: str, categories: list
+) -> dict:
+    """Map store category id -> English name, for language-independent matching.
+
+    Feature flags and the play-mode list are derived by matching Steam's English
+    category names ("Co-op", "Steam Cloud", …), so reading them off a localized
+    appdetails response silently reports every one of them as absent. Category
+    *ids* are stable across languages, so re-read the same cached endpoint in
+    English and key off those.
+
+    Returns {} when the caller already asked for English, when the app has no
+    categories to translate, or when the extra lookup fails — in each case the
+    localized names are used, which is no worse than not asking.
+    """
+    if not categories or language.strip().lower() == "english":
+        return {}
+    try:
+        data = await _store_get(
+            "appdetails",
+            {"appids": appid, "cc": country_code, "l": "english"},
+            cache_ttl=CACHE_TTL_APPDETAILS,
+        )
+        entry = (data or {}).get(str(appid), {})
+        if not entry.get("success"):
+            return {}
+        return {
+            c.get("id"): c.get("description", "")
+            for c in (entry.get("data") or {}).get("categories", [])
+        }
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 async def _raw_get_text(url: str, params: dict[str, Any] | None = None,
                         cache_ttl: float = 0) -> str:
     """GET a public endpoint and return the raw text body (e.g. community XML)."""
@@ -922,6 +956,21 @@ def _hours_str(minutes: Optional[int]) -> str:
     m = minutes or 0
     h = _minutes_to_hours(m)
     return "<0.1" if m > 0 and h == 0 else f"{h}"
+
+
+def _pct_value(value: Any) -> Optional[float]:
+    """Coerce a Steam percentage to a float, or None if it isn't one.
+
+    GetGlobalAchievementPercentagesForApp returns `percent` as a JSON number for
+    most apps but as a string for some, and omits it entirely for others. Passing
+    that straight to round() raises TypeError and takes the whole tool down.
+    """
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _dump(payload: Any) -> str:
@@ -2037,7 +2086,10 @@ async def steam_get_global_achievement_percentages(params: AppOnlyInput) -> str:
         ach = data.get("achievementpercentages", {}).get("achievements", [])
         rows = sorted(
             (
-                {"api_name": a.get("name"), "global_pct": round(a.get("percent", 0), 2)}
+                {
+                    "api_name": a.get("name"),
+                    "global_pct": round(_pct_value(a.get("percent")) or 0.0, 2),
+                }
                 for a in ach
             ),
             key=lambda r: r["global_pct"],
@@ -2185,13 +2237,14 @@ async def steam_get_rarest_unlocks(params: RarestUnlocksInput) -> str:
         if not unlocked:
             return f"{sid} has no unlocked achievements in app {params.appid}."
         pct_map = {
-            g.get("name"): g.get("percent", 0.0)
+            g.get("name"): _pct_value(g.get("percent"))
             for g in glob_data.get("achievementpercentages", {}).get("achievements", [])
         }
         rows = []
         for a in unlocked:
             api = a.get("apiname")
-            pct = round(pct_map[api], 2) if api in pct_map else None
+            raw_pct = pct_map.get(api)
+            pct = round(raw_pct, 2) if raw_pct is not None else None
             rows.append(
                 {
                     "name": a.get("name") or api,
@@ -2338,8 +2391,20 @@ async def steam_get_app_details(params: AppDetailsInput) -> str:
             return f"No store details found for app {params.appid}."
         d = entry.get("data", {})
 
-        cats = [c.get("description", "") for c in d.get("categories", [])]
-        cats_l = [c.lower() for c in cats]
+        # Everything below matches Steam's *English* category names, so pair each
+        # localized name with its English counterpart: display stays in the
+        # caller's language, detection stops depending on it.
+        raw_cats = d.get("categories", [])
+        en_names = await _english_category_names(
+            params.appid, params.country_code, params.language, raw_cats
+        )
+        cat_pairs = [
+            (c.get("description", ""),
+             en_names.get(c.get("id")) or c.get("description", ""))
+            for c in raw_cats
+        ]
+        cats = [localized for localized, _ in cat_pairs]
+        cats_l = [english.lower() for _, english in cat_pairs]
 
         def _has(*subs):
             return any(any(sub in c for c in cats_l) for sub in subs)
@@ -2424,7 +2489,7 @@ async def steam_get_app_details(params: AppDetailsInput) -> str:
             "Shared/Split Screen Co-op", "Shared/Split Screen PvP", "MMO",
             "Cross-Platform Multiplayer", "LAN Co-op", "LAN PvP", "PvP",
         }
-        modes = [c for c in cats if c in mode_set]
+        modes = [localized for localized, english in cat_pairs if english in mode_set]
         price_str = summary["price"] or ("Free" if summary["is_free"] else "Unknown")
         if summary["discount_pct"]:
             price_str += f" ({summary['discount_pct']}% off)"
@@ -3104,7 +3169,7 @@ def _fmt_review(r: dict) -> dict:
             (r.get("author") or {}).get("playtime_forever")
         ),
         "timestamp_created": r.get("timestamp_created"),
-        "excerpt": (text[:280] + "…") if len(text) > 280 else text,
+        "excerpt": _excerpt(text),
     }
 
 
@@ -3692,7 +3757,7 @@ async def steam_get_app_news(params: AppNewsInput) -> str:
                     "date": it.get("date"),
                     "feed": it.get("feedlabel"),
                     "url": it.get("url"),
-                    "excerpt": (body[:280] + "…") if len(body) > 280 else body,
+                    "excerpt": _excerpt(body),
                 }
             )
         if not rows:
@@ -4011,6 +4076,16 @@ async def steam_compare_players(params: ComparePlayersInput) -> str:
 # ---------------------------------------------------------------------------
 
 _STRIP_HTML_MAX = 20000  # cap raw input before the O(n^2) tag regexes (ReDoS guard)
+
+
+def _excerpt(text: str, limit: int = 280) -> str:
+    """Shorten `text` to at most `limit` characters, ellipsis included.
+
+    The ellipsis replaces a character rather than riding past the cap, so a
+    truncated excerpt is exactly `limit` long and never one over — same
+    convention as _strip_html.
+    """
+    return (text[: limit - 1] + "…") if len(text) > limit else text
 
 
 def _strip_html(s, limit: int = 600):
