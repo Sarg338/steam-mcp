@@ -1,6 +1,6 @@
 [project]
 name = "steam-mcp"
-version = "1.16.0"
+version = "1.16.1"
 description = "Read-only Steam MCP server: games, reviews, sales, prices and player counts with no API key; add your own key for library, friends and achievements."
 readme = "README.md"
 requires-python = ">=3.10"

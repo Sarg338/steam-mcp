@@ -1989,14 +1989,21 @@ def test_global_achievement_percentages_tolerate_string_percents(monkeypatch):
             {"name": "A", "percent": "80.126"},     # string, not a number
             {"name": "B", "percent": 5.0},
             {"name": "C"},                          # absent entirely
-            {"name": "D", "percent": None}]}}
+            {"name": "D", "percent": None},
+            {"name": "E", "percent": "NaN"}]}}      # float() accepts this
 
     monkeypatch.setattr(S, "_steam_get", fake_steam)
     out = run(S.steam_get_global_achievement_percentages(
         S.GlobalAchievementsInput(appid=1, response_format="json")))
     rows = json.loads(out)["achievements"]
-    assert [r["global_pct"] for r in rows] == [0.0, 0.0, 5.0, 80.13]
-    assert {r["api_name"] for r in rows} == {"A", "B", "C", "D"}
+    # Unknown rarity is null and sorts LAST (as the 1.14.1 changelog promised),
+    # never 0.0 — that would rank it as the game's rarest achievement.
+    assert [r["global_pct"] for r in rows] == [5.0, 80.13, None, None, None]
+    assert [r["api_name"] for r in rows[:2]] == ["B", "A"]
+    assert {r["api_name"] for r in rows} == {"A", "B", "C", "D", "E"}
+    md = run(S.steam_get_global_achievement_percentages(
+        S.GlobalAchievementsInput(appid=1)))
+    assert "- B: 5.0% of players" in md and "- C: rarity n/a" in md
 
 
 def test_rarest_unlocks_tolerates_string_percents(monkeypatch):
@@ -2663,3 +2670,220 @@ def test_annotations_are_minimal_and_read_only():
         assert ann["readOnlyHint"] is True, t.name
         assert ann.get("title"), t.name
         assert {k for k, v in ann.items() if v is not None} == {"title", "readOnlyHint"}
+
+
+
+# --------------------------------------------------------------------------- #
+# 1.16.1: review scan resilience, overall score, percent guards, cache
+# --------------------------------------------------------------------------- #
+
+def test_pct_value_rejects_non_finite_and_bool():
+    assert S._pct_value("12.5") == 12.5
+    for bad in ("NaN", "nan", "Infinity", "-inf", float("nan"), True, "x", None):
+        assert S._pct_value(bad) is None, bad
+
+
+def _review(rid, ts, up=True):
+    return {"recommendationid": rid, "timestamp_created": ts, "voted_up": up,
+            "votes_up": 0, "author": {"playtime_forever": 60}, "review": "ok"}
+
+
+def test_recent_scan_skips_reviews_repeated_across_pages(monkeypatch):
+    now = time.time()
+    pages = {
+        "*": {"success": 1, "cursor": "c1",
+              "reviews": [_review("1", now - 10), _review("2", now - 20)]},
+        # a new review landed between requests, shifting "2" onto page two
+        "c1": {"success": 1, "cursor": "c2",
+               "reviews": [_review("2", now - 20), _review("3", now - 30, False)]},
+        "c2": {"success": 1, "cursor": "c3", "reviews": []},
+    }
+
+    async def fake_raw(url, params, cache_ttl=0):
+        return pages[params["cursor"]]
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    window, capped = run(S._collect_recent_reviews(1, 30, "us"))
+    assert [r["recommendationid"] for r in window] == ["1", "2", "3"]
+    assert capped is False
+
+
+def test_recent_scan_keeps_what_it_counted_when_a_page_fails(monkeypatch):
+    now = time.time()
+
+    async def fake_raw(url, params, cache_ttl=0):
+        if params["cursor"] == "*":
+            return {"success": 1, "cursor": "c1",
+                    "reviews": [_review("1", now - 10), _review("2", now - 20)]}
+        raise S.httpx2.TimeoutException("slow")
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    window, capped = run(S._collect_recent_reviews(1, 30, "us"))
+    assert len(window) == 2 and capped is True        # partial, and flagged
+
+
+def test_recent_scan_flags_a_refused_page_as_incomplete(monkeypatch):
+    async def fake_raw(url, params, cache_ttl=0):
+        return {"success": 2}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    assert run(S._collect_recent_reviews(1, 30, "us")) == ([], True)
+
+
+def test_app_reviews_survive_a_failed_recent_scan(monkeypatch):
+    # The lifetime summary came back; a timeout in the recent tally must not
+    # turn the whole answer into an error.
+    async def fake_raw(url, params, cache_ttl=0):
+        if params["filter"] == "all":
+            return {"success": 1, "reviews": [], "query_summary": {
+                "review_score_desc": "Very Positive", "total_reviews": 10,
+                "total_positive": 9, "total_negative": 1}}
+        raise S.httpx2.TimeoutException("slow")
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    md = run(S.steam_get_app_reviews(S.AppReviewsInput(appid=1, review_filter="recent")))
+    assert "Very Positive" in md and "90.0%" in md
+    assert "unavailable" in md and "0.0% of 0" not in md
+    d = json.loads(run(S.steam_get_app_reviews(S.AppReviewsInput(
+        appid=1, review_filter="recent", response_format="json"))))
+    assert d["summary"]["positive_pct"] == 90.0
+    assert d["recent"]["reviews_counted"] == 0 and d["recent"]["sampled"] is True
+
+
+def test_app_reviews_overall_score_ignores_the_excerpt_filter(monkeypatch):
+    calls = []
+
+    async def fake_raw(url, params, cache_ttl=0):
+        calls.append((params["review_type"], params["num_per_page"]))
+        if params["review_type"] == "all":
+            summ = {"review_score_desc": "Very Positive", "total_reviews": 10,
+                    "total_positive": 8, "total_negative": 2}
+            return {"success": 1, "reviews": [], "query_summary": summ}
+        # Steam computes query_summary over the filtered set
+        return {"success": 1, "reviews": [_review("9", 1, up=False)],
+                "query_summary": {"total_reviews": 2, "total_positive": 0,
+                                  "total_negative": 2}}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    d = json.loads(run(S.steam_get_app_reviews(S.AppReviewsInput(
+        appid=1, review_type="negative", limit=3, response_format="json"))))
+    assert d["summary"]["positive_pct"] == 80.0          # not 0.0
+    assert d["summary"]["total_positive"] == 8
+    assert [r["voted_up"] for r in d["reviews"]] == [False]
+    assert calls == [("all", 0), ("negative", 3)]
+
+
+def test_app_reviews_default_is_still_one_request(monkeypatch):
+    calls = []
+
+    async def fake_raw(url, params, cache_ttl=0):
+        calls.append((params["review_type"], params["num_per_page"]))
+        return {"success": 1, "reviews": [_review("1", 1)], "query_summary": {
+            "total_reviews": 1, "total_positive": 1, "total_negative": 0}}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    run(S.steam_get_app_reviews(S.AppReviewsInput(appid=1, limit=5)))
+    assert calls == [("all", 5)]
+
+
+def test_ttl_cache_evicts_least_recently_used_not_everything():
+    c = S._TTLCache(maxsize=3)
+    c.set("a", 1, 100)
+    c.set("b", 2, 100)
+    c.set("c", 3, 100)
+    assert c.get("a") == 1              # touch "a": "b" is now the oldest
+    c.set("d", 4, 100)
+    assert c.get("b") is None
+    assert (c.get("a"), c.get("c"), c.get("d")) == (1, 3, 4)
+    c._d["c"] = (0.0, 3)                # "c" expires in place
+    c.set("f", 6, 100)                  # expired entries go before live LRU ones
+    assert "c" not in c._d
+    assert (c.get("a"), c.get("d"), c.get("f")) == (1, 4, 6)
+
+
+def test_concurrent_identical_requests_share_one_fetch(monkeypatch):
+    S._CACHE.clear()
+    calls = {"n": 0}
+
+    class FakeResp:
+        def json(self):
+            return {"ok": True}
+
+    async def fake_http(client, url, params, timeout):
+        calls["n"] += 1
+        await asyncio.sleep(0.01)
+        return FakeResp()
+
+    monkeypatch.setattr(S, "_get_with_retry", fake_http)
+    monkeypatch.setattr(S, "_http_client", lambda: None)
+
+    async def many():
+        return await asyncio.gather(*(
+            S._raw_get("https://store.steampowered.com/x", {"a": 1}, cache_ttl=60)
+            for _ in range(5)))
+
+    results = run(many())
+    assert calls["n"] == 1 and all(r == {"ok": True} for r in results)
+    assert not S._INFLIGHT
+
+
+def test_a_failed_shared_fetch_reaches_every_waiter_and_is_not_cached(monkeypatch):
+    S._CACHE.clear()
+    calls = {"n": 0}
+
+    async def boom(client, url, params, timeout):
+        calls["n"] += 1
+        await asyncio.sleep(0.01)
+        raise S.httpx2.TimeoutException("slow")
+
+    monkeypatch.setattr(S, "_get_with_retry", boom)
+    monkeypatch.setattr(S, "_http_client", lambda: None)
+
+    async def many():
+        return await asyncio.gather(*(
+            S._raw_get("https://store.steampowered.com/y", {}, cache_ttl=60)
+            for _ in range(3)), return_exceptions=True)
+
+    results = run(many())
+    assert calls["n"] == 1
+    assert all(isinstance(r, S.httpx2.TimeoutException) for r in results)
+    assert not S._INFLIGHT and S._CACHE.get(
+        S._cache_key("https://store.steampowered.com/y", {})) is None
+
+
+def test_server_instructions_mark_community_text_untrusted():
+    assert S.mcp.instructions == S.SERVER_INSTRUCTIONS
+    text = S.SERVER_INSTRUCTIONS.lower()
+    assert "untrusted" in text and "review" in text and "never follow" in text
+    assert len(S.SERVER_INSTRUCTIONS) < 400        # paid once per session
+
+
+def test_cancelling_the_shared_fetch_leader_does_not_cancel_its_waiters(monkeypatch):
+    S._CACHE.clear()
+    calls = {"n": 0}
+
+    class FakeResp:
+        def json(self):
+            return {"ok": calls["n"]}
+
+    async def slow(client, url, params, timeout):
+        calls["n"] += 1
+        await asyncio.sleep(0.05)
+        return FakeResp()
+
+    monkeypatch.setattr(S, "_get_with_retry", slow)
+    monkeypatch.setattr(S, "_http_client", lambda: None)
+    url = "https://store.steampowered.com/z"
+
+    async def scenario():
+        leader = asyncio.ensure_future(S._raw_get(url, {}, cache_ttl=60))
+        await asyncio.sleep(0.01)                 # leader's request in flight
+        waiter = asyncio.ensure_future(S._raw_get(url, {}, cache_ttl=60))
+        await asyncio.sleep(0.01)
+        leader.cancel()                           # its client gave up
+        with pytest.raises(asyncio.CancelledError):
+            await leader
+        return await waiter                       # retried as the new leader
+
+    assert run(scenario()) == {"ok": 2}
+    assert calls["n"] == 2 and not S._INFLIGHT
