@@ -1894,8 +1894,8 @@ def test_user_game_stats(monkeypatch):
 
     monkeypatch.setattr(S, "_steam_get", fake_steam)
     out = run(S.steam_get_user_game_stats(
-        S.PlayerGameInput(steamid="76561197960287930", appid=440,
-                          response_format="json")))
+        S.UserGameStatsInput(steamid="76561197960287930", appid=440,
+                             response_format="json")))
     d = json.loads(out)
     assert d["game"] == "TF2" and d["stat_count"] == 2
     assert d["stats"][0] == {"name": "kills", "value": 100}
@@ -1907,7 +1907,7 @@ def test_user_game_stats_empty(monkeypatch):
 
     monkeypatch.setattr(S, "_steam_get", fake_steam)
     out = run(S.steam_get_user_game_stats(
-        S.PlayerGameInput(steamid="76561197960287930", appid=1)))
+        S.UserGameStatsInput(steamid="76561197960287930", appid=1)))
     assert "No stats available" in out
 
 
@@ -1993,7 +1993,7 @@ def test_global_achievement_percentages_tolerate_string_percents(monkeypatch):
 
     monkeypatch.setattr(S, "_steam_get", fake_steam)
     out = run(S.steam_get_global_achievement_percentages(
-        S.AppOnlyInput(appid=1, response_format="json")))
+        S.GlobalAchievementsInput(appid=1, response_format="json")))
     rows = json.loads(out)["achievements"]
     assert [r["global_pct"] for r in rows] == [0.0, 0.0, 5.0, 80.13]
     assert {r["api_name"] for r in rows} == {"A", "B", "C", "D"}
@@ -2567,3 +2567,99 @@ def test_app_prices_fallback_keeps_the_release_date(monkeypatch):
     assert pm[20]["release_ts"] == 1700000000
     assert pm[21]["name"] == "KeepMyName"          # not blanked by the failed fill
     assert pm[21]["release_ts"] == 1700000001
+
+
+# Every list a JSON response carries is bounded by a `limit`, reports the full
+# count, and says when it was cut — so no response can outgrow the per-result
+# token budget, and the model knows to ask for more.
+
+def test_player_achievements_locked_list_is_capped(monkeypatch):
+    achs = [{"apiname": f"A{i}", "name": f"Ach {i}", "achieved": int(i < 10)}
+            for i in range(400)]
+
+    async def fake_steam(path, params, **k):
+        return {"playerstats": {"success": True, "gameName": "Big",
+                                "achievements": achs}}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    d = json.loads(run(S.steam_get_player_achievements(S.PlayerAchievementsInput(
+        steamid="76561197960287930", appid=1, response_format="json"))))
+    assert d["total"] == 400 and d["unlocked"] == 10
+    assert len(d["locked"]) == 50 and d["locked_truncated"] is True
+    d = json.loads(run(S.steam_get_player_achievements(S.PlayerAchievementsInput(
+        steamid="76561197960287930", appid=1, limit=300, response_format="json"))))
+    assert len(d["locked"]) == 300 and d["locked_truncated"] is True
+    md = run(S.steam_get_player_achievements(S.PlayerAchievementsInput(
+        steamid="76561197960287930", appid=1, limit=20)))
+    assert "…and 370 more" in md
+
+
+def test_game_schema_list_is_capped(monkeypatch):
+    async def fake_steam(path, params, **k):
+        return {"game": {"gameName": "Big", "availableGameStats": {"achievements": [
+            {"name": f"A{i}", "displayName": f"Ach {i}", "description": "d"}
+            for i in range(300)]}}}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    d = json.loads(run(S.steam_get_game_schema(
+        S.GameSchemaInput(appid=1, response_format="json"))))
+    assert d["achievement_count"] == 300
+    assert len(d["achievements"]) == 100 and d["truncated"] is True
+    d = json.loads(run(S.steam_get_game_schema(
+        S.GameSchemaInput(appid=1, limit=250, response_format="json"))))
+    assert len(d["achievements"]) == 250
+
+
+def test_global_achievements_list_is_capped(monkeypatch):
+    async def fake_steam(path, params, **k):
+        return {"achievementpercentages": {"achievements": [
+            {"name": f"A{i}", "percent": i / 10} for i in range(120)]}}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    d = json.loads(run(S.steam_get_global_achievement_percentages(
+        S.GlobalAchievementsInput(appid=1, response_format="json"))))
+    assert d["achievement_count"] == 120 and d["truncated"] is True
+    assert [r["api_name"] for r in d["achievements"]] == [f"A{i}" for i in range(50)]
+    d = json.loads(run(S.steam_get_global_achievement_percentages(
+        S.GlobalAchievementsInput(appid=1, limit=500, response_format="json"))))
+    assert len(d["achievements"]) == 120 and d["truncated"] is False
+
+
+def test_user_game_stats_list_is_capped(monkeypatch):
+    async def fake_steam(path, params, **k):
+        return {"playerstats": {"gameName": "G", "stats": [
+            {"name": f"s{i}", "value": i} for i in range(150)]}}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    d = json.loads(run(S.steam_get_user_game_stats(S.UserGameStatsInput(
+        steamid="76561197960287930", appid=1, response_format="json"))))
+    assert d["stat_count"] == 150
+    assert len(d["stats"]) == 100 and d["truncated"] is True
+
+
+def test_inventory_item_list_is_capped(monkeypatch):
+    n = 120
+
+    async def fake_raw(url, params, cache_ttl=0):
+        return {"success": 1, "total_inventory_count": n,
+                "assets": [{"classid": str(i), "instanceid": "0", "amount": "1"}
+                           for i in range(n)],
+                "descriptions": [{"classid": str(i), "instanceid": "0",
+                                  "name": f"Item {i}"} for i in range(n)]}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    d = json.loads(run(S.steam_get_inventory(S.InventoryInput(
+        steamid="76561197960287930", response_format="json"))))
+    assert d["distinct_items"] == n
+    assert len(d["items"]) == 50 and d["truncated"] is True
+    md = run(S.steam_get_inventory(S.InventoryInput(
+        steamid="76561197960287930", limit=10)))
+    assert f"{n} distinct, showing 10." in md and "…and 110 more distinct" in md
+
+
+def test_annotations_are_minimal_and_read_only():
+    for t in run(S.mcp.list_tools()):
+        ann = _wire(t)["annotations"]
+        assert ann["readOnlyHint"] is True, t.name
+        assert ann.get("title"), t.name
+        assert {k for k, v in ann.items() if v is not None} == {"title", "readOnlyHint"}

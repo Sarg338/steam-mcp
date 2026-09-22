@@ -101,6 +101,11 @@ mcp = _build_server()
 # string}) and echo into structuredContent on every call — the same text sent
 # twice per result, plus ~1.3k tokens of schema in tools/list, for no extra
 # information.
+#
+# Tool annotations carry only `title` and `readOnlyHint: true`. The spec makes
+# destructiveHint and idempotentHint meaningful only when readOnlyHint is false,
+# and openWorldHint already defaults to true, so spelling them out on all 37
+# tools was ~0.6k tokens of tools/list that told a client nothing.
 
 # Security: the HTTP stack logs full request URLs at INFO, and Steam requires the
 # API key as a `?key=` query param — so quiet those loggers to keep the key out of
@@ -1127,8 +1132,7 @@ class DeckCompatInput(BaseModel):
     structured_output=False,
     annotations={
         "title": "Steam Deck Compatibility",
-        "readOnlyHint": True, "destructiveHint": False,
-        "idempotentHint": True, "openWorldHint": True,
+        "readOnlyHint": True,
     },
 )
 async def steam_get_deck_compatibility(params: DeckCompatInput) -> str:
@@ -1360,9 +1364,6 @@ class AppNewsInput(BaseModel):
     annotations={
         "title": "Resolve Steam Vanity URL",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 @_with_default_user
@@ -1394,9 +1395,6 @@ async def steam_resolve_vanity_url(params: PlayerInput) -> str:
     annotations={
         "title": "Get Steam Player Summary",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 @_with_default_user
@@ -1449,9 +1447,6 @@ async def steam_get_player_summary(params: PlayersInput) -> str:
     annotations={
         "title": "Get Steam Level",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 @_with_default_user
@@ -1484,9 +1479,6 @@ async def steam_get_steam_level(params: PlayerInput) -> str:
     annotations={
         "title": "Get Steam Player Bans",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 @_with_default_user
@@ -1532,9 +1524,6 @@ async def steam_get_player_bans(params: PlayerInput) -> str:
     annotations={
         "title": "Get Steam Friend List",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 @_with_default_user
@@ -1669,9 +1658,6 @@ async def _friend_owns_app(fid: str, appid: int) -> dict:
     annotations={
         "title": "Find Friends Who Own a Game",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 @_with_default_user
@@ -1782,9 +1768,6 @@ async def steam_find_friends_who_own(params: FriendsWhoOwnInput) -> str:
     annotations={
         "title": "Get Steam Owned Games",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 @_with_default_user
@@ -1879,9 +1862,6 @@ async def steam_get_owned_games(params: OwnedGamesInput) -> str:
     annotations={
         "title": "Get Steam Recently Played Games",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 @_with_default_user
@@ -1932,19 +1912,25 @@ async def steam_get_recently_played_games(params: PlayerInput) -> str:
 # Tools: achievements & stats
 # ---------------------------------------------------------------------------
 
+class PlayerAchievementsInput(PlayerGameInput):
+    limit: int = Field(
+        default=50,
+        description="Max locked achievements to list (1-300); the counts always "
+        "cover all of them.",
+        ge=1, le=300,
+    )
+
+
 @mcp.tool(
     name="steam_get_player_achievements",
     structured_output=False,
     annotations={
         "title": "Get Steam Player Achievements",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 @_with_default_user
-async def steam_get_player_achievements(params: PlayerGameInput) -> str:
+async def steam_get_player_achievements(params: PlayerAchievementsInput) -> str:
     """Get a user's achievement progress for a specific game.
 
     Reports how many achievements are unlocked vs total, and lists locked ones.
@@ -1953,11 +1939,12 @@ async def steam_get_player_achievements(params: PlayerGameInput) -> str:
     the game to have achievements.
 
     Args:
-        params (PlayerGameInput): steamid, appid.
+        params (PlayerAchievementsInput): steamid, appid, limit.
 
     Returns:
         str: Markdown or JSON. Includes game name, unlocked count, total count,
-        completion percentage, and a list of locked achievements.
+        completion percentage, and up to `limit` locked achievements (JSON flags
+        `locked_truncated` when there are more).
     """
     try:
         sid = await _resolve_steamid(params.steamid)
@@ -1990,8 +1977,9 @@ async def steam_get_player_achievements(params: PlayerGameInput) -> str:
                     "completion_pct": pct,
                     "locked": [
                         {"api_name": a.get("apiname"), "name": a.get("name")}
-                        for a in locked
+                        for a in locked[: params.limit]
                     ],
+                    "locked_truncated": len(locked) > params.limit,
                 }
             )
 
@@ -2002,17 +1990,26 @@ async def steam_get_player_achievements(params: PlayerGameInput) -> str:
         ]
         if locked:
             lines.append(f"## Still locked ({len(locked)})")
-            for a in locked[:50]:
+            for a in locked[: params.limit]:
                 name = a.get("name") or a.get("apiname")
                 desc = f" — {a['description']}" if a.get("description") else ""
                 lines.append(f"- {name}{desc}")
-            if len(locked) > 50:
-                lines.append(f"- …and {len(locked) - 50} more")
+            if len(locked) > params.limit:
+                lines.append(f"- …and {len(locked) - params.limit} more")
         else:
             lines.append("🏆 All achievements unlocked!")
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001
         return _handle_error(e)
+
+
+class GameSchemaInput(AppOnlyInput):
+    limit: int = Field(
+        default=100,
+        description="Max achievement definitions to list (1-250); the count always "
+        "covers all of them.",
+        ge=1, le=250,
+    )
 
 
 @mcp.tool(
@@ -2021,23 +2018,21 @@ async def steam_get_player_achievements(params: PlayerGameInput) -> str:
     annotations={
         "title": "Get Steam Game Schema",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
-async def steam_get_game_schema(params: AppOnlyInput) -> str:
+async def steam_get_game_schema(params: GameSchemaInput) -> str:
     """Get the achievement and stat definitions for a game (not user-specific).
 
     Useful to see the full list of achievements a game offers, with display names
     and descriptions, independent of any player.
 
     Args:
-        params (AppOnlyInput): appid.
+        params (GameSchemaInput): appid, limit.
 
     Returns:
-        str: Markdown or JSON. game name plus achievement definitions
-        (api_name, display_name, description, hidden).
+        str: Markdown or JSON. game name, achievement_count, and up to `limit`
+        achievement definitions (api_name, display_name, description, hidden);
+        JSON flags `truncated` when there are more.
     """
     try:
         data = await _steam_get(
@@ -2058,21 +2053,33 @@ async def steam_get_game_schema(params: AppOnlyInput) -> str:
         ]
         name = game.get("gameName", str(params.appid))
         if params.response_format == ResponseFormat.JSON:
-            return _dump({"appid": params.appid, "game": name, "achievements": rows})
+            return _dump({"appid": params.appid, "game": name,
+                          "achievement_count": len(rows),
+                          "achievements": rows[: params.limit],
+                          "truncated": len(rows) > params.limit})
 
         lines = [
             f"# Schema: {name} (appid {params.appid})",
             f"{len(rows)} achievements defined.",
             "",
         ]
-        for r in rows[:100]:
+        for r in rows[: params.limit]:
             hidden = " [hidden]" if r["hidden"] else ""
             lines.append(f"- **{r['display_name']}**{hidden}: {r['description']}")
-        if len(rows) > 100:
-            lines.append(f"- …and {len(rows) - 100} more")
+        if len(rows) > params.limit:
+            lines.append(f"- …and {len(rows) - params.limit} more")
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001
         return _handle_error(e)
+
+
+class GlobalAchievementsInput(AppOnlyInput):
+    limit: int = Field(
+        default=50,
+        description="Max achievements to list, rarest first (1-500); the count "
+        "always covers all of them.",
+        ge=1, le=500,
+    )
 
 
 @mcp.tool(
@@ -2081,23 +2088,23 @@ async def steam_get_game_schema(params: AppOnlyInput) -> str:
     annotations={
         "title": "Get Global Achievement Rarity",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
-async def steam_get_global_achievement_percentages(params: AppOnlyInput) -> str:
+async def steam_get_global_achievement_percentages(
+    params: GlobalAchievementsInput,
+) -> str:
     """Get the global unlock percentage (rarity) of each achievement in a game.
 
     Lower percentages mean rarer achievements. Pair with
     steam_get_player_achievements to tell a user which of their unlocks are rarest.
 
     Args:
-        params (AppOnlyInput): appid.
+        params (GlobalAchievementsInput): appid, limit.
 
     Returns:
-        str: Markdown or JSON. Per achievement: api_name, global_pct
-        (sorted rarest first).
+        str: Markdown or JSON. achievement_count plus, for up to `limit`
+        achievements: api_name, global_pct (sorted rarest first); JSON flags
+        `truncated` when there are more.
     """
     try:
         data = await _steam_get(
@@ -2120,16 +2127,28 @@ async def steam_get_global_achievement_percentages(params: AppOnlyInput) -> str:
         if not rows:
             return f"No global achievement data for app {params.appid}."
         if params.response_format == ResponseFormat.JSON:
-            return _dump({"appid": params.appid, "achievements": rows})
+            return _dump({"appid": params.appid,
+                          "achievement_count": len(rows),
+                          "achievements": rows[: params.limit],
+                          "truncated": len(rows) > params.limit})
 
         lines = [f"# Achievement rarity for app {params.appid} (rarest first)", ""]
-        for r in rows[:50]:
+        for r in rows[: params.limit]:
             lines.append(f"- {r['api_name']}: {r['global_pct']}% of players")
-        if len(rows) > 50:
-            lines.append(f"- …and {len(rows) - 50} more")
+        if len(rows) > params.limit:
+            lines.append(f"- …and {len(rows) - params.limit} more")
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001
         return _handle_error(e)
+
+
+class UserGameStatsInput(PlayerGameInput):
+    limit: int = Field(
+        default=100,
+        description="Max stats to list (1-500); stat_count always covers all of "
+        "them.",
+        ge=1, le=500,
+    )
 
 
 @mcp.tool(
@@ -2138,13 +2157,10 @@ async def steam_get_global_achievement_percentages(params: AppOnlyInput) -> str:
     annotations={
         "title": "Get Steam User Game Stats",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 @_with_default_user
-async def steam_get_user_game_stats(params: PlayerGameInput) -> str:
+async def steam_get_user_game_stats(params: UserGameStatsInput) -> str:
     """Get a user's in-game STATS for a specific game (kills, wins, distance, etc.).
 
     Complements steam_get_player_achievements: where that lists achievement
@@ -2155,10 +2171,11 @@ async def steam_get_user_game_stats(params: PlayerGameInput) -> str:
     many games define none (then this returns an empty result). Needs an API key.
 
     Args:
-        params (PlayerGameInput): steamid, appid.
+        params (UserGameStatsInput): steamid, appid, limit.
 
     Returns:
-        str: Markdown or JSON. game name plus each tracked stat (name, value).
+        str: Markdown or JSON. game name, stat_count, and up to `limit` tracked
+        stats (name, value); JSON flags `truncated` when there are more.
     """
     try:
         sid = await _resolve_steamid(params.steamid)
@@ -2183,7 +2200,8 @@ async def steam_get_user_game_stats(params: PlayerGameInput) -> str:
                     "appid": params.appid,
                     "game": game_name,
                     "stat_count": len(rows),
-                    "stats": rows,
+                    "stats": rows[: params.limit],
+                    "truncated": len(rows) > params.limit,
                 }
             )
 
@@ -2192,10 +2210,10 @@ async def steam_get_user_game_stats(params: PlayerGameInput) -> str:
             f"{len(rows)} stats tracked for {sid}.",
             "",
         ]
-        for r in rows[:100]:
+        for r in rows[: params.limit]:
             lines.append(f"- **{r['name']}**: {r['value']}")
-        if len(rows) > 100:
-            lines.append(f"- …and {len(rows) - 100} more")
+        if len(rows) > params.limit:
+            lines.append(f"- …and {len(rows) - params.limit} more")
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001
         return _handle_error(e)
@@ -2215,9 +2233,6 @@ class RarestUnlocksInput(PlayerGameInput):
     annotations={
         "title": "Get Player's Rarest Achievement Unlocks",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 @_with_default_user
@@ -2317,9 +2332,6 @@ async def steam_get_rarest_unlocks(params: RarestUnlocksInput) -> str:
     annotations={
         "title": "Search Steam Store Apps",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 async def steam_search_apps(params: AppSearchInput) -> str:
@@ -2371,9 +2383,6 @@ async def steam_search_apps(params: AppSearchInput) -> str:
     annotations={
         "title": "Get Steam App Details",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 async def steam_get_app_details(params: AppDetailsInput) -> str:
@@ -2607,9 +2616,6 @@ class DlcInput(BaseModel):
     annotations={
         "title": "Get Steam Game DLC",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 async def steam_get_dlc(params: DlcInput) -> str:
@@ -2740,9 +2746,6 @@ async def _tag_name_map() -> dict:
     annotations={
         "title": "Get Steam Community Tags",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 async def steam_get_app_tags(params: AppTagsInput) -> str:
@@ -3102,9 +3105,6 @@ class DiscoverInput(BaseModel):
     annotations={
         "title": "Discover / Recommend Steam Games",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 async def steam_discover(params: DiscoverInput) -> str:
@@ -3369,9 +3369,6 @@ async def _collect_recent_reviews(
     annotations={
         "title": "Get Steam App Reviews & Rating",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 async def steam_get_app_reviews(params: AppReviewsInput) -> str:
@@ -3630,9 +3627,6 @@ async def _app_prices(appids: list[int], cc: str = "us") -> dict[int, dict]:
     annotations={
         "title": "Get Steam Featured Sales/Specials",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 async def steam_get_featured_specials(params: FeaturedInput) -> str:
@@ -3679,9 +3673,6 @@ async def steam_get_featured_specials(params: FeaturedInput) -> str:
     annotations={
         "title": "Get Steam Store Highlights",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 async def steam_get_store_highlights(params: StoreHighlightsInput) -> str:
@@ -3749,9 +3740,6 @@ async def steam_get_store_highlights(params: StoreHighlightsInput) -> str:
     annotations={
         "title": "Get Steam Wishlist",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 @_with_default_user
@@ -3850,9 +3838,6 @@ async def steam_get_wishlist(params: WishlistInput) -> str:
     annotations={
         "title": "Get Steam Live Player Count",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 async def steam_get_current_players(params: AppOnlyInput) -> str:
@@ -3890,9 +3875,6 @@ async def steam_get_current_players(params: AppOnlyInput) -> str:
     annotations={
         "title": "Get Steam App News/Updates",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 async def steam_get_app_news(params: AppNewsInput) -> str:
@@ -4002,9 +3984,6 @@ class ComparePlayersInput(BaseModel):
     annotations={
         "title": "Get Steam Player Badges",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 @_with_default_user
@@ -4080,9 +4059,6 @@ async def steam_get_player_badges(params: PlayerInput) -> str:
     annotations={
         "title": "Get Steam Package/Bundle Details",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 async def steam_get_package_details(params: PackageDetailsInput) -> str:
@@ -4152,9 +4128,6 @@ async def steam_get_package_details(params: PackageDetailsInput) -> str:
     annotations={
         "title": "Compare Two Steam Players",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 @_with_default_user
@@ -4416,9 +4389,6 @@ class LibraryAnalysisInput(BaseModel):
     annotations={
         "title": "Analyze Steam Library / Backlog",
         "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
     },
 )
 @_with_default_user
@@ -4683,8 +4653,7 @@ class ShouldIBuyInput(BaseModel):
     structured_output=False,
     annotations={
         "title": "Steam Buying Brief (Should I Buy?)",
-        "readOnlyHint": True, "destructiveHint": False,
-        "idempotentHint": True, "openWorldHint": True,
+        "readOnlyHint": True,
     },
 )
 async def steam_should_i_buy(params: ShouldIBuyInput) -> str:
@@ -4855,8 +4824,7 @@ class RecommendInput(BaseModel):
     structured_output=False,
     annotations={
         "title": "Recommend Steam Games (with reasons)",
-        "readOnlyHint": True, "destructiveHint": False,
-        "idempotentHint": True, "openWorldHint": True,
+        "readOnlyHint": True,
     },
 )
 async def steam_recommend(params: RecommendInput) -> str:
@@ -5084,8 +5052,7 @@ class PlanCoopNightInput(BaseModel):
     structured_output=False,
     annotations={
         "title": "Plan a Steam Co-op Night",
-        "readOnlyHint": True, "destructiveHint": False,
-        "idempotentHint": True, "openWorldHint": True,
+        "readOnlyHint": True,
     },
 )
 @_with_default_user
@@ -5315,8 +5282,7 @@ class RegionalPricingInput(BaseModel):
     structured_output=False,
     annotations={
         "title": "Get Steam Regional Pricing",
-        "readOnlyHint": True, "destructiveHint": False,
-        "idempotentHint": True, "openWorldHint": True,
+        "readOnlyHint": True,
     },
 )
 async def steam_get_app_regional_pricing(params: RegionalPricingInput) -> str:
@@ -5381,8 +5347,7 @@ class WorkshopItemInput(BaseModel):
     structured_output=False,
     annotations={
         "title": "Get Steam Workshop Item",
-        "readOnlyHint": True, "destructiveHint": False,
-        "idempotentHint": True, "openWorldHint": True,
+        "readOnlyHint": True,
     },
 )
 async def steam_get_workshop_item(params: WorkshopItemInput) -> str:
@@ -5500,8 +5465,7 @@ async def _group_details(gid: str) -> dict:
     structured_output=False,
     annotations={
         "title": "Get Steam User Groups",
-        "readOnlyHint": True, "destructiveHint": False,
-        "idempotentHint": True, "openWorldHint": True,
+        "readOnlyHint": True,
     },
 )
 @_with_default_user
@@ -5584,6 +5548,11 @@ class InventoryInput(BaseModel):
         default="english", min_length=2, max_length=32,
         description="Steam language name for localized item names.",
     )
+    limit: int = Field(
+        default=50, ge=1, le=200,
+        description="Max distinct items to list, most-numerous first (1-200); "
+        "distinct_items always counts all of them.",
+    )
     response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
 
 
@@ -5592,8 +5561,7 @@ class InventoryInput(BaseModel):
     structured_output=False,
     annotations={
         "title": "Get Steam Inventory",
-        "readOnlyHint": True, "destructiveHint": False,
-        "idempotentHint": True, "openWorldHint": True,
+        "readOnlyHint": True,
     },
 )
 @_with_default_user
@@ -5609,11 +5577,13 @@ async def steam_get_inventory(params: InventoryInput) -> str:
     resolution, which does need a key).
 
     Args:
-        params (InventoryInput): steamid, appid, context_id, count, language.
+        params (InventoryInput): steamid, appid, context_id, count, language,
+            limit.
 
     Returns:
-        str: Markdown or JSON. total_inventory_count plus items (name, type, count,
-        tradable, marketable), most-numerous first.
+        str: Markdown or JSON. total_inventory_count plus up to `limit` items
+        (name, type, count, tradable, marketable), most-numerous first; JSON
+        flags `truncated` when there are more distinct items.
     """
     try:
         sid = await _resolve_steamid(params.steamid)
@@ -5654,17 +5624,19 @@ async def steam_get_inventory(params: InventoryInput) -> str:
             return _dump({
                 "steamid": sid, "appid": params.appid, "context_id": ctx,
                 "total_inventory_count": total, "fetched": fetched,
-                "distinct_items": len(rows), "items": rows,
+                "distinct_items": len(rows), "items": rows[: params.limit],
+                "truncated": len(rows) > params.limit,
             })
 
         partial = (f" (sampled {fetched} of {total:,})" if total and fetched < total
                    else "")
         lines = [
             f"# Inventory: {sid} — app {params.appid} (context {ctx})",
-            f"{total:,} items total{partial}; {len(rows)} distinct shown.",
+            f"{total:,} items total{partial}; {len(rows)} distinct, showing "
+            f"{min(len(rows), params.limit)}.",
             "",
         ]
-        for r in rows[:50]:
+        for r in rows[: params.limit]:
             flags = []
             if r["tradable"]:
                 flags.append("tradable")
@@ -5674,8 +5646,8 @@ async def steam_get_inventory(params: InventoryInput) -> str:
             qty = f" ×{r['count']}" if r["count"] > 1 else ""
             typ = f" — {r['type']}" if r["type"] else ""
             lines.append(f"- **{r['name'] or 'Unknown item'}**{qty}{typ}{flagstr}")
-        if len(rows) > 50:
-            lines.append(f"- …and {len(rows) - 50} more distinct items")
+        if len(rows) > params.limit:
+            lines.append(f"- …and {len(rows) - params.limit} more distinct items")
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001
         return _handle_error(e)
@@ -5734,8 +5706,7 @@ class MarketPriceInput(BaseModel):
     structured_output=False,
     annotations={
         "title": "Get Steam Community Market Price",
-        "readOnlyHint": True, "destructiveHint": False,
-        "idempotentHint": True, "openWorldHint": True,
+        "readOnlyHint": True,
     },
 )
 async def steam_get_market_price(params: MarketPriceInput) -> str:

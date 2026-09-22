@@ -5,9 +5,19 @@ A concise, one-line-per-change history. Versions follow
 <https://github.com/Sarg338/steam-mcp/releases>
 
 ## [Unreleased]
-- **Smaller tool definitions:** the model-visible tool list (names, descriptions and input schemas) shrinks from about 12.1k to 9.7k estimated tokens, about 20% less, on every request. The input schemas no longer carry Pydantic's auto-generated `title` on every property, and the `response_format` enum sits on the field itself instead of in a separate `$defs` copy in all 37 tools. Parameter names, types, defaults, constraints and descriptions are unchanged, and inputs are still validated against the same models.
+- **Smaller tool definitions:** the model-visible tool list (names, descriptions and input schemas) shrinks from about 12.1k to 9.9k estimated tokens, about 18% less, on every request, even after the new `limit` fields below (the full `tools/list` payload drops from about 14.9k to 10.6k). The input schemas no longer carry Pydantic's auto-generated `title` on every property, and the `response_format` enum sits on the field itself instead of in a separate `$defs` copy in all 37 tools. Parameter names, types, defaults, constraints and descriptions are unchanged, and inputs are still validated against the same models.
 - **Tool results are sent once:** tools no longer declare an `outputSchema` (`{"result": string}`), so a result is no longer repeated in `structuredContent` next to its text. That also removes about 1.3k tokens of schema from `tools/list`.
 - **Compact JSON output:** `response_format="json"` responses are serialized without indentation. They are about 25% smaller (for example, `steam_analyze_library` at maximum limits drops from about 8.6k to 6.4k estimated tokens). The fields and structure are unchanged.
+- **Every JSON list now has a bound.** Five tools returned their whole list in JSON while capping it in markdown. A game with a thousand achievements, or a large inventory, could produce a response several times over the ~25k-token per-result guidance. Each now takes an optional `limit` (defaults match the old markdown caps) and reports the full count along with a truncation flag:
+  - `steam_get_player_achievements`: `limit` (default 50, max 300) locked achievements, plus `locked_truncated`.
+  - `steam_get_game_schema`: `limit` (100, max 250), plus `achievement_count` and `truncated`.
+  - `steam_get_global_achievement_percentages`: `limit` (50, max 500, rarest first), plus `achievement_count` and `truncated`.
+  - `steam_get_user_game_stats`: `limit` (100, max 500), plus `truncated`. `stat_count` still covers every stat.
+  - `steam_get_inventory`: `limit` (50, max 200) distinct items, plus `truncated`. `distinct_items` still covers every item.
+
+  Markdown output keeps the same default caps but now follows `limit`. The token audit covers all five at their maximums, and the worst case is about 15k.
+- The inventory header no longer claims every distinct item is "shown" when only the first 50 are listed.
+- **Leaner tool annotations:** each tool now sends only `title` and `readOnlyHint: true`. The spec only gives `destructiveHint` and `idempotentHint` meaning when `readOnlyHint` is false, and `openWorldHint` defaults to true.
 - **Fixed: `steam_discover` with `released_within_days` could drop released games that GetItems couldn't price.** For those games the per-app price lookup replaced the whole entry, release date included, so the release-window filter treated them as having an unknown date. The lookup now fills in the price and leaves the release date alone. It also no longer blanks a name GetItems already had when it fails itself.
 
 ## [1.15.0]

@@ -108,7 +108,7 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_get_steam_level` | Steam community level | yes |
 | `steam_get_player_bans` | VAC / game / community / economy bans | yes |
 | `steam_get_player_achievements` | Per-game unlocked vs locked achievements | yes |
-| `steam_get_game_schema` | A game's full achievement/stat definitions | yes |
+| `steam_get_game_schema` | A game's achievement definitions (names, descriptions, hidden flag) | yes |
 | `steam_get_global_achievement_percentages` | Achievement rarity (global %) | no |
 | `steam_get_user_game_stats` | **A user's in-game stats** (kills, wins, distance…) for a game | yes |
 | `steam_get_rarest_unlocks` | **A player's rarest achievement unlocks** in a game (by global rarity) | yes |
