@@ -4,7 +4,7 @@ A concise, one-line-per-change history. Versions follow
 [Semantic Versioning](https://semver.org/). Releases:
 <https://github.com/Sarg338/steam-mcp/releases>
 
-## [Unreleased]
+## [1.16.0]
 - **Smaller tool definitions:** the model-visible tool list (names, descriptions and input schemas) shrinks from about 12.1k to 9.9k estimated tokens, about 18% less, on every request, even after the new `limit` fields below (the full `tools/list` payload drops from about 14.9k to 10.6k). The input schemas no longer carry Pydantic's auto-generated `title` on every property, and the `response_format` enum sits on the field itself instead of in a separate `$defs` copy in all 37 tools. Parameter names, types, defaults, constraints and descriptions are unchanged, and inputs are still validated against the same models.
 - **Tool results are sent once:** tools no longer declare an `outputSchema` (`{"result": string}`), so a result is no longer repeated in `structuredContent` next to its text. That also removes about 1.3k tokens of schema from `tools/list`.
 - **Compact JSON output:** `response_format="json"` responses are serialized without indentation. They are about 25% smaller (for example, `steam_analyze_library` at maximum limits drops from about 8.6k to 6.4k estimated tokens). The fields and structure are unchanged.
