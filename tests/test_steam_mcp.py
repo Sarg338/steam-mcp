@@ -8,6 +8,7 @@ import inspect
 import json
 import logging
 import re
+import time
 
 import pytest
 from pydantic import ValidationError
@@ -248,6 +249,125 @@ def test_discover_basic(monkeypatch):
     assert d["personalized"] is False
 
 
+def _review_row(appid, pct=None, count=0):
+    """One search-result row as Steam renders it, with the review tooltip."""
+    tip = (f'<div class="search_review_summary" data-tooltip-html="Very Positive'
+           f'<br>{pct}% of the {count:,} user reviews for this game are positive.">'
+           f'</div>') if pct is not None else ""
+    return f'<a data-ds-appid="{appid}"></a>{tip}'
+
+
+def test_discover_search_parses_review_tooltips(monkeypatch):
+    async def fake_raw(url, params, cache_ttl=0):
+        return {"total_count": 2,
+                "results_html": _review_row(10, 92, 15632) + _review_row(20)}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    rows, total = run(S._discover_search({}))
+    assert total == 2
+    assert rows[0] == {"appid": 10, "review_pct": 92, "review_count": 15632}
+    assert rows[1] == {"appid": 20, "review_pct": None, "review_count": 0}
+
+
+def test_discover_null_total_count_does_not_crash(monkeypatch):
+    # Steam sends an explicit null here; "Matched {total:,}" used to raise on it.
+    async def fake_raw(url, params, cache_ttl=0):
+        return {"total_count": None, "results_html": _review_row(10, 90, 100)}
+
+    async def fake_app_prices(appids, cc):
+        return {a: {"name": "A"} for a in appids}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
+    text = run(S.steam_discover(S.DiscoverInput(term="x")))
+    assert "Matched 1 games" in text          # falls back to the row count
+
+
+def test_discover_window_honours_requested_sort(monkeypatch):
+    # Newest-first from Steam, but the caller asked for best-reviewed first.
+    now = time.time()
+    html = (_review_row(1)                    # newest, unreviewed shovelware
+            + _review_row(2, 75, 4)           # thinly reviewed
+            + _review_row(3, 95, 5000))       # the one a human wants first
+
+    async def fake_raw(url, params, cache_ttl=0):
+        return {"total_count": 3,
+                "results_html": html if int(params.get("start", 0)) == 0 else ""}
+
+    async def fake_app_prices(appids, cc):
+        return {a: {"name": f"G{a}", "release_ts": now - a * 86400,
+                    "price_cents": 1000} for a in appids}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
+    out = run(S.steam_discover(S.DiscoverInput(
+        released_within_days=30, sort="reviews", response_format="json")))
+    d = json.loads(out)
+    # Well-reviewed first, thin second, unreviewed last — not Steam's date order.
+    assert [r["appid"] for r in d["results"]] == [3, 2, 1]
+    assert d["results"][0]["review_pct"] == 95
+    assert d["window_coverage"] == "full"
+
+    out = run(S.steam_discover(S.DiscoverInput(
+        released_within_days=30, sort="release", response_format="json")))
+    assert [r["appid"] for r in json.loads(out)["results"]] == [1, 2, 3]
+
+
+def test_discover_window_filters_before_the_limit_slice(monkeypatch):
+    # 5 results; only the last 2 are inside the window. Asking for 2 must return
+    # both, not "whichever of the first 2 happened to qualify" (which is none).
+    now = time.time()
+    in_window = {40, 50}
+
+    async def fake_raw(url, params, cache_ttl=0):
+        if int(params.get("start", 0)):
+            return {"total_count": 5, "results_html": ""}
+        return {"total_count": 5,
+                "results_html": "".join(_review_row(a, 80, 100)
+                                        for a in (10, 20, 30, 40, 50))}
+
+    async def fake_app_prices(appids, cc):
+        return {a: {"name": f"G{a}", "price_cents": 100,
+                    "release_ts": now - (1 if a in in_window else 400) * 86400}
+                for a in appids}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
+    out = run(S.steam_discover(S.DiscoverInput(
+        released_within_days=30, limit=2, sort="release", response_format="json")))
+    d = json.loads(out)
+    assert d["count"] == 2
+    assert sorted(r["appid"] for r in d["results"]) == [40, 50]
+
+
+def test_discover_excluded_owned_counts_hidden_not_library(monkeypatch):
+    async def fake_raw(url, params, cache_ttl=0):
+        return {"total_count": 2,
+                "results_html": _review_row(10, 90, 50) + _review_row(20, 90, 50)}
+
+    async def fake_app_prices(appids, cc):
+        return {a: {"name": f"G{a}"} for a in appids}
+
+    async def fake_taste(sid, **k):
+        # A 900-game library, but only appid 10 is among the results.
+        return {"owned_ids": {10} | set(range(1000, 1899)),
+                "tag_ids": [], "tag_names": [], "seed_games": ["X"]}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
+    monkeypatch.setattr(S, "_taste_profile", fake_taste)
+    monkeypatch.setattr(S, "_resolve_steamid", lambda x=None: _ident())
+    out = run(S.steam_discover(S.DiscoverInput(
+        steamid="76561197960287930", response_format="json")))
+    d = json.loads(out)
+    assert d["excluded_owned"] == 1          # not 900
+    assert [r["appid"] for r in d["results"]] == [20]
+
+
+async def _ident():
+    return "76561197960287930"
+
+
 def test_discover_explicit_tags(monkeypatch):
     captured = {}
 
@@ -368,6 +488,81 @@ def test_should_i_buy(monkeypatch):
     assert d["review_trend_pts"] == round(66.7 - 90.0, 1)
     assert d["top_tags"] == ["Action", "Indie"]
     assert d["personal"] is None                            # no steamid
+
+
+def test_recommend_anchors_on_seed_when_steamid_also_given(monkeypatch):
+    """seed_appid + steamid is "games like X that I don't own".
+
+    The steamid is required for the ownership exclusion, so it must not also
+    hijack the basis — the old precedence (tags > taste > seed) silently
+    recommended from the user's most-played genres instead of from X.
+    """
+    async def fake_map():
+        return {1: "Roguelike", 2: "Action", 9: "Farming"}
+
+    async def fake_items(appids):
+        m = {100: [{"tagid": 1, "weight": 99}],      # the seed game: Roguelike
+             20: [{"tagid": 1, "weight": 10}],
+             30: [{"tagid": 1, "weight": 8}]}
+        return {a: m.get(a, []) for a in appids}
+
+    async def fake_taste(sid, **k):
+        # Taste says Farming — nothing like the seed game.
+        return {"owned_ids": {30}, "tag_ids": [9], "tag_names": ["Farming"],
+                "seed_games": ["Stardew"]}
+
+    async def fake_discover(query):
+        return [20, 30], 2
+
+    async def fake_app_price(a, cc):
+        return {"name": f"G{a}"}
+
+    async def fake_app_prices(appids, cc):
+        return {a: {"name": f"G{a}"} for a in appids}
+
+    monkeypatch.setattr(S, "_tag_name_map", fake_map)
+    monkeypatch.setattr(S, "_items_tags", fake_items)
+    monkeypatch.setattr(S, "_taste_profile", fake_taste)
+    monkeypatch.setattr(S, "_resolve_steamid", lambda x=None: _ident())
+    monkeypatch.setattr(S, "_discover_appids", fake_discover)
+    monkeypatch.setattr(S, "_app_price", fake_app_price)
+    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
+    out = run(S.steam_recommend(S.RecommendInput(
+        seed_appid=100, steamid="76561197960287930", response_format="json")))
+    d = json.loads(out)
+    assert d["basis"] == "like G100"          # the seed, NOT "your taste (Stardew)"
+    ids = [r["appid"] for r in d["recommendations"]]
+    assert 30 not in ids                      # the steamid still excludes owned
+    assert ids == [20]
+    assert d["excluded_owned"] == 1           # candidates hidden, not library size
+
+
+def test_recommend_taste_still_used_when_no_seed_or_tags(monkeypatch):
+    async def fake_map():
+        return {9: "Farming"}
+
+    async def fake_items(appids):
+        return {a: [{"tagid": 9, "weight": 5}] for a in appids}
+
+    async def fake_taste(sid, **k):
+        return {"owned_ids": set(), "tag_ids": [9], "tag_names": ["Farming"],
+                "seed_games": ["Stardew"]}
+
+    async def fake_discover(query):
+        return [20], 1
+
+    async def fake_app_prices(appids, cc):
+        return {a: {"name": f"G{a}"} for a in appids}
+
+    monkeypatch.setattr(S, "_tag_name_map", fake_map)
+    monkeypatch.setattr(S, "_items_tags", fake_items)
+    monkeypatch.setattr(S, "_taste_profile", fake_taste)
+    monkeypatch.setattr(S, "_resolve_steamid", lambda x=None: _ident())
+    monkeypatch.setattr(S, "_discover_appids", fake_discover)
+    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
+    out = run(S.steam_recommend(S.RecommendInput(
+        steamid="76561197960287930", response_format="json")))
+    assert json.loads(out)["basis"] == "your taste (Stardew)"
 
 
 def test_recommend_seed(monkeypatch):

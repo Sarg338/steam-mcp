@@ -2791,6 +2791,39 @@ async def steam_get_app_tags(params: AppTagsInput) -> str:
 
 SEARCH_URL = "https://store.steampowered.com/search/results/"
 
+_WINDOW_PAGE_SIZE = 100
+_WINDOW_MAX_PAGES = 3          # up to 300 newest matches considered
+# Review ranking guard: a fresh release with a handful of glowing reviews should
+# not outrank an established 90%-positive game, and unreviewed games rank last.
+_MIN_RANKED_REVIEWS = 10
+
+
+def _rank_window(rows: list[dict], sort: str) -> list[dict]:
+    """Order release-window candidates by the requested sort, client-side.
+
+    'reviews': games with >= _MIN_RANKED_REVIEWS reviews first (by percent, then
+    volume), then thinly-reviewed ones, then unreviewed. 'release' keeps
+    newest-first. Price sorts use the numeric price when known (unknown last);
+    'relevance' keeps Steam's newest-first enumeration order.
+    """
+    if sort == "reviews":
+        def key(r):
+            n = r.get("review_count") or 0
+            tier = 0 if n >= _MIN_RANKED_REVIEWS else (1 if n else 2)
+            return (tier, -(r.get("review_pct") or 0), -n)
+        return sorted(rows, key=key)
+    if sort == "release":
+        return sorted(rows, key=lambda r: -(r.get("release_ts") or 0))
+    if sort in ("price_asc", "price_desc"):
+        sign = 1 if sort == "price_asc" else -1
+        return sorted(
+            rows,
+            key=lambda r: (r.get("price_cents") is None,
+                           sign * (r.get("price_cents") or 0)),
+        )
+    return rows  # relevance: keep enumeration order
+
+
 # Friendly sort name -> Steam search sort_by value ("" = let Steam default).
 _SORT_MAP = {
     "reviews": "Reviews_DESC",
@@ -2908,25 +2941,58 @@ async def _taste_profile(sid: str, max_seed: int = 12, top_tags: int = 5) -> dic
     }
 
 
-async def _discover_appids(query: dict) -> tuple[list[int], int]:
-    """Run the storefront search; return (ranked_appids, total_count).
+# Review summary as rendered in each search-result row's tooltip, e.g.
+# "Very Positive<br>92% of the 15,632 user reviews for this game are positive."
+# (the <br> may arrive entity-escaped inside the attribute). Bounded patterns.
+_SEARCH_REVIEW_RE = re.compile(r"(\d{1,3})% of the ([\d,]{1,15}) user reviews")
+
+
+async def _discover_search(query: dict) -> tuple[list[dict], int]:
+    """Run the storefront search; return (ranked result rows, total_count).
 
     The store search returns rendered HTML, so we pull the ranked app IDs from the
-    stable `data-ds-appid` attribute on each result row. Guarded: an empty/garbled
-    response simply yields no IDs.
+    stable `data-ds-appid` attribute on each result row — plus, when the row
+    carries a review-summary tooltip, the lifetime review percentage and count, so
+    callers can re-rank client-side without extra requests. Each row is
+    {"appid", "review_pct" (int|None), "review_count" (int)}. Guarded: an
+    empty/garbled response simply yields no rows; a row with no/unparseable review
+    summary gets review_pct=None, review_count=0.
     """
     data = await _raw_get(SEARCH_URL, query, cache_ttl=CACHE_TTL_DISCOVER)
     if not isinstance(data, dict):
         return [], 0
     html = data.get("results_html") or ""
-    ids: list[int] = []
+    matches = list(re.finditer(r'data-ds-appid="(\d+)', html))
+    rows: list[dict] = []
     seen = set()
-    for m in re.finditer(r'data-ds-appid="(\d+)', html):
+    for i, m in enumerate(matches):
         a = int(m.group(1))
-        if a not in seen:
-            seen.add(a)
-            ids.append(a)
-    return ids, data.get("total_count", len(ids))
+        if a in seen:
+            continue
+        seen.add(a)
+        # The review tooltip sits between this row's anchor and the next row's.
+        # Cap the slice so a pathological payload can't feed the regex unbounded.
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(html)
+        segment = html[m.start():min(end, m.start() + 8000)]
+        pct: Optional[int] = None
+        count = 0
+        rm = _SEARCH_REVIEW_RE.search(segment)
+        if rm:
+            try:
+                pct = int(rm.group(1))
+                count = int(rm.group(2).replace(",", ""))
+            except ValueError:
+                pct, count = None, 0
+        rows.append({"appid": a, "review_pct": pct, "review_count": count})
+    # `or len(rows)`, not a .get default: Steam sends an explicit null here, and a
+    # None total blows up the "Matched {total:,}" formatting downstream.
+    return rows, (data.get("total_count") or len(rows))
+
+
+async def _discover_appids(query: dict) -> tuple[list[int], int]:
+    """Back-compat wrapper over `_discover_search`: (ranked_appids, total_count)."""
+    rows, total = await _discover_search(query)
+    return [r["appid"] for r in rows], total
 
 
 class DiscoverInput(BaseModel):
@@ -2971,8 +3037,9 @@ class DiscoverInput(BaseModel):
     )
     released_within_days: Optional[int] = Field(
         default=None, ge=1, le=3650,
-        description="Only include games released in the last N days (forces "
-        "newest-first). Use for 'what came out recently'. Omit for any release date.",
+        description="Only include games released in the last N days, ordered by "
+        "`sort` within that window. Use for 'what came out recently' or "
+        "'well-reviewed games from the last year'. Omit for any release date.",
     )
     limit: int = Field(
         default=15, description="Max results to return (1-50).", ge=1, le=50
@@ -3061,34 +3128,79 @@ async def steam_discover(params: DiscoverInput) -> str:
             query["specials"] = 1
         if params.platform:
             query["os"] = params.platform
-        sort_by = _SORT_MAP.get(params.sort, "Reviews_DESC")
-        if params.released_within_days:
-            sort_by = "Released_DESC"  # a release window is inherently newest-first
-        if sort_by:
-            query["sort_by"] = sort_by
-
-        appids, total = await _discover_appids(query)
-        appids = [a for a in appids if a not in owned_ids]
-        page = appids[: params.limit]
-        pm = await _app_prices(page, cc) if page else {}
-        infos = [pm.get(a, {}) for a in page]
-        cutoff = (time.time() - params.released_within_days * 86400
-                  if params.released_within_days else None)
-        rows = []
-        for a, info in zip(page, infos, strict=True):
-            if cutoff is not None:
-                rts = info.get("release_ts")
-                if not rts or rts < cutoff:
-                    continue  # released before the window, or release date unknown
-            rows.append({
+        def _row(meta: dict, info: dict) -> dict:
+            a = meta["appid"]
+            return {
                 "appid": a,
                 "name": info.get("name") or f"app {a}",
                 "price": info.get("price"),
                 "discount_pct": info.get("discount_pct", 0),
                 "on_sale": info.get("on_sale", False),
-            })
+                "review_pct": meta.get("review_pct"),
+                "review_count": meta.get("review_count") or 0,
+            }
 
-        excluded = len(owned_ids) if (params.steamid and params.exclude_owned) else 0
+        window = params.released_within_days
+        excluded = 0
+        coverage = "full"
+        if not window:
+            sort_by = _SORT_MAP.get(params.sort, "Reviews_DESC")
+            if sort_by:
+                query["sort_by"] = sort_by
+            found, total = await _discover_search(query)
+            excluded = sum(1 for r in found if r["appid"] in owned_ids)
+            kept = [r for r in found if r["appid"] not in owned_ids]
+            page = kept[: params.limit]
+            pm = await _app_prices([r["appid"] for r in page], cc) if page else {}
+            rows = [_row(r, pm.get(r["appid"], {})) for r in page]
+        else:
+            # Release window: Steam can't filter by date server-side, so enumerate
+            # the window newest-first (Released_DESC guarantees everything inside
+            # the window precedes everything outside it), then re-rank client-side
+            # by the requested sort — "well-reviewed AND recent" must not collapse
+            # into "newest". The window filter also has to run over the whole
+            # candidate set, before the limit slice, or asking for 20 returns only
+            # however many of the first 20 happened to land inside the window.
+            query["sort_by"] = "Released_DESC"
+            cutoff = time.time() - window * 86400
+            candidates: list[dict] = []
+            seen: set[int] = set()   # pages can drift/overlap while Steam re-ranks
+            total = 0
+            for page_no in range(_WINDOW_MAX_PAGES):
+                q = dict(query, start=page_no * _WINDOW_PAGE_SIZE,
+                         count=_WINDOW_PAGE_SIZE)
+                found, page_total = await _discover_search(q)
+                if page_total:
+                    total = page_total
+                if not found:
+                    break
+                pm = await _app_prices([r["appid"] for r in found], cc)
+                past_window = False
+                for r in found:
+                    if r["appid"] in seen:
+                        continue
+                    seen.add(r["appid"])
+                    info = pm.get(r["appid"], {})
+                    rts = info.get("release_ts")
+                    if not rts:
+                        continue  # release date unknown: can't confirm the window
+                    if rts < cutoff:
+                        past_window = True  # newest-first => the rest are older
+                        continue
+                    if r["appid"] in owned_ids:
+                        excluded += 1
+                        continue
+                    candidates.append({**_row(r, info),
+                                       "price_cents": info.get("price_cents"),
+                                       "release_ts": rts})
+                if past_window or len(found) < _WINDOW_PAGE_SIZE:
+                    break
+            else:
+                coverage = "partial"  # page cap hit while still inside the window
+            ranked = _rank_window(candidates, params.sort)
+            rows = [{k: v for k, v in r.items()
+                     if k not in ("price_cents", "release_ts")}
+                    for r in ranked[: params.limit]]
         if params.response_format == ResponseFormat.JSON:
             return _dump({
                 "filters": {
@@ -3108,6 +3220,7 @@ async def steam_discover(params: DiscoverInput) -> str:
                 "excluded_owned": excluded,
                 "total_count": total,
                 "count": len(rows),
+                **({"window_coverage": coverage} if window else {}),
                 "results": rows,
             })
 
@@ -3125,9 +3238,8 @@ async def steam_discover(params: DiscoverInput) -> str:
         lines = [
             f"# Discover: {', '.join(bits) if bits else 'top games'}",
             f"Matched {total:,} games; showing {len(rows)}"
-            + (f" released in the last {params.released_within_days} days "
-               "(newest first)." if params.released_within_days
-               else f" (sorted by {params.sort})."),
+            + (f" released in the last {window} days" if window else "")
+            + f" (sorted by {params.sort}).",
         ]
         if params.steamid and seed_games:
             extra = f" -> tags: {', '.join(taste_tags)}" if taste_tags else ""
@@ -3389,11 +3501,16 @@ async def _app_price(appid: int, cc: str) -> dict:
         price = d.get("price_overview") or {}
         is_free = d.get("is_free", False)
         disc = price.get("discount_percent", 0) or 0
+        try:
+            cents = 0 if is_free else int(price.get("final"))
+        except (TypeError, ValueError):
+            cents = None
         return {
             "appid": appid,
             "name": d.get("name"),
             "is_free": is_free,
             "price": price.get("final_formatted") or ("Free" if is_free else None),
+            "price_cents": cents,
             "discount_pct": disc,
             "on_sale": disc > 0,
         }
@@ -3441,9 +3558,14 @@ async def _app_prices(appids: list[int], cc: str = "us") -> dict[int, dict]:
                 rts = int((it.get("release") or {}).get("steam_release_date"))
             except (TypeError, ValueError):
                 rts = None
+            try:
+                cents = 0 if is_free else int(bpo.get("final_price_in_cents"))
+            except (TypeError, ValueError):
+                cents = None
             res[aid] = {
                 "appid": aid, "name": it.get("name"), "is_free": is_free,
-                "price": price, "discount_pct": disc, "on_sale": disc > 0,
+                "price": price, "price_cents": cents,
+                "discount_pct": disc, "on_sale": disc > 0,
                 "release_ts": rts,
             }
         return res
@@ -4660,8 +4782,9 @@ class RecommendInput(BaseModel):
     )
     steamid: Optional[str] = Field(
         default=None, max_length=200,
-        description="Recommend from this user's taste (most-played + recent); also "
-        "excludes games they already own. SteamID64, vanity, or profile URL.",
+        description="Excludes games this user already owns; seeds the tags from "
+        "their taste (most-played + recent) only when no seed_appid/tags are "
+        "given. SteamID64, vanity, or profile URL.",
     )
     tags: list[str] = Field(
         default_factory=list, max_length=10,
@@ -4689,10 +4812,12 @@ async def steam_recommend(params: RecommendInput) -> str:
     """Recommend games similar to a seed game ("like Hades") or to a user's taste, explaining the shared tags; for "games like X" / "what should I play" (for filtered search use steam_discover).
 
     Pick a basis: a seed_appid ("games like Hades"), a steamid (your most-played +
-    recent taste), or explicit tags. Finds well-reviewed games that share those
-    tags — excluding the seed game and (with steamid) games you already own — and
-    explains WHY each matches (the shared tags). The store search needs no key;
-    steamid personalization does.
+    recent taste), or explicit tags — precedence tags > seed_appid > taste. Pass
+    BOTH seed_appid and steamid for "games like X that I don't own": the seed
+    drives the tags and the steamid supplies the ownership exclusion. Finds
+    well-reviewed games that share those tags — excluding the seed game and (with
+    steamid) games you already own — and explains WHY each matches (the shared
+    tags). The store search needs no key; steamid personalization does.
 
     Args:
         params (RecommendInput): seed_appid, steamid, tags, max_price, limit, cc.
@@ -4709,18 +4834,14 @@ async def steam_recommend(params: RecommendInput) -> str:
         exclude: set = set()
         owned_ids: set = set()
 
+        # Basis precedence: explicit tags > seed game > taste. A steamid ALWAYS
+        # contributes the ownership exclusion, but only seeds the tags when
+        # neither tags nor seed_appid were given — "games like X that I don't
+        # own" must anchor on X, not on the user's most-played genres.
         if params.tags:
             seed_ids, _ = await _resolve_tag_ids(params.tags)
             filter_ids = seed_ids[:]
             basis = "tags: " + ", ".join(params.tags)
-        if params.steamid:
-            sid = await _resolve_steamid(params.steamid)
-            taste = await _taste_profile(sid)
-            owned_ids = {a for a in taste["owned_ids"] if a}
-            if not seed_ids and taste["tag_ids"]:
-                seed_ids = taste["tag_ids"]
-                filter_ids = seed_ids[:3]
-                basis = "your taste (" + ", ".join(taste["seed_games"][:3]) + ")"
         if not seed_ids and params.seed_appid:
             tmap = await _items_tags([params.seed_appid])
             for t in (tmap.get(params.seed_appid, []) or [])[:10]:
@@ -4732,6 +4853,14 @@ async def steam_recommend(params: RecommendInput) -> str:
             info = await _app_price(params.seed_appid, cc)
             basis = "like " + (info.get("name") or f"app {params.seed_appid}")
             exclude.add(params.seed_appid)
+        if params.steamid:
+            sid = await _resolve_steamid(params.steamid)
+            taste = await _taste_profile(sid)
+            owned_ids = {a for a in taste["owned_ids"] if a}
+            if not seed_ids and taste["tag_ids"]:
+                seed_ids = taste["tag_ids"]
+                filter_ids = seed_ids[:3]
+                basis = "your taste (" + ", ".join(taste["seed_games"][:3]) + ")"
 
         if not seed_ids:
             return ("Provide a basis: seed_appid (games like X), steamid (your "
@@ -4746,6 +4875,7 @@ async def steam_recommend(params: RecommendInput) -> str:
         if params.max_price is not None:
             query["maxprice"] = str(params.max_price)
         cand, _ = await _discover_appids(query)
+        excluded_owned = sum(1 for a in cand if a in owned_ids)
         cand = [a for a in cand if a not in exclude][:40]
         if not cand:
             return "No recommendations found — try fewer/different tags or a higher price."
@@ -4778,10 +4908,11 @@ async def steam_recommend(params: RecommendInput) -> str:
             })
 
         if params.response_format == ResponseFormat.JSON:
-            return _dump({"basis": basis, "excluded_owned": len(owned_ids),
+            return _dump({"basis": basis, "excluded_owned": excluded_owned,
                           "count": len(rows), "recommendations": rows})
 
-        owned_note = f", excluding {len(owned_ids)} you own" if owned_ids else ""
+        owned_note = (f", excluding {excluded_owned} you own"
+                      if excluded_owned else "")
         lines = [f"# Recommendations — {basis}", f"{len(rows)} games{owned_note}:", ""]
         for r in rows:
             why = f" — matches: {', '.join(r['matching_tags'])}" if r["matching_tags"] else ""
