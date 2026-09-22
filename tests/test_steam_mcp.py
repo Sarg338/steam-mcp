@@ -2887,3 +2887,30 @@ def test_cancelling_the_shared_fetch_leader_does_not_cancel_its_waiters(monkeypa
 
     assert run(scenario()) == {"ok": 2}
     assert calls["n"] == 2 and not S._INFLIGHT
+
+
+def test_manifest_lists_exactly_the_registered_tools():
+    """manifest.json's tool list is what desktop installs show before the server
+    ever runs. A tool added, renamed or removed in code but not there (or vice
+    versa) ships a bundle that describes a different server."""
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    listed = [t["name"] for t in manifest["tools"]]
+    registered = {t.name for t in run(S.mcp.list_tools())}
+    assert len(listed) == len(set(listed)), "duplicate tool in manifest.json"
+    assert set(listed) == registered, (
+        f"only in manifest: {sorted(set(listed) - registered)}; "
+        f"only in server: {sorted(registered - set(listed))}")
+
+
+def test_release_script_check_passes_on_the_repo():
+    import pathlib
+    import subprocess
+    import sys
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    res = subprocess.run([sys.executable, str(root / "scripts" / "release.py"), "check"],
+                         capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
