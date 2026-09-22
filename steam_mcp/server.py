@@ -59,7 +59,7 @@ except ImportError:  # pragma: no cover - depends on installed SDK major
 __version__ = "1.15.0"
 
 # Cache freshness hints (SEP-2549, spec revision 2026-07-28) — v2 SDK only. Our
-# tool/prompt/template listings are static for the life of the process (~58 KB of
+# tool/prompt/template listings are static for the life of the process (~45 KB of
 # tools/list alone), so clients may hold them for an hour; resource reads follow
 # the appdetails TTL we already apply server-side. `public` is safe because none
 # of these listings vary per caller — this server has no per-user auth, and the
@@ -95,6 +95,12 @@ def _build_server() -> Any:
 
 
 mcp = _build_server()
+
+# Every tool is registered with structured_output=False. The tools return `str`,
+# which the SDK would otherwise wrap in a declared outputSchema ({"result":
+# string}) and echo into structuredContent on every call — the same text sent
+# twice per result, plus ~1.3k tokens of schema in tools/list, for no extra
+# information.
 
 # Security: the HTTP stack logs full request URLs at INFO, and Steam requires the
 # API key as a `?key=` query param — so quiet those loggers to keep the key out of
@@ -974,7 +980,12 @@ def _pct_value(value: Any) -> Optional[float]:
 
 
 def _dump(payload: Any) -> str:
-    return json.dumps(payload, indent=2, ensure_ascii=False)
+    """Serialize a JSON response compactly.
+
+    The reader is a model, not a person: indentation carries no information and
+    cost ~25% of every JSON response in whitespace.
+    """
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
 
 def _fmt_amount(amount: Optional[float], currency: Optional[str] = None) -> Optional[str]:
@@ -1113,6 +1124,7 @@ class DeckCompatInput(BaseModel):
 
 @mcp.tool(
     name="steam_get_deck_compatibility",
+    structured_output=False,
     annotations={
         "title": "Steam Deck Compatibility",
         "readOnlyHint": True, "destructiveHint": False,
@@ -1344,6 +1356,7 @@ class AppNewsInput(BaseModel):
 
 @mcp.tool(
     name="steam_resolve_vanity_url",
+    structured_output=False,
     annotations={
         "title": "Resolve Steam Vanity URL",
         "readOnlyHint": True,
@@ -1377,6 +1390,7 @@ async def steam_resolve_vanity_url(params: PlayerInput) -> str:
 
 @mcp.tool(
     name="steam_get_player_summary",
+    structured_output=False,
     annotations={
         "title": "Get Steam Player Summary",
         "readOnlyHint": True,
@@ -1431,6 +1445,7 @@ async def steam_get_player_summary(params: PlayersInput) -> str:
 
 @mcp.tool(
     name="steam_get_steam_level",
+    structured_output=False,
     annotations={
         "title": "Get Steam Level",
         "readOnlyHint": True,
@@ -1465,6 +1480,7 @@ async def steam_get_steam_level(params: PlayerInput) -> str:
 
 @mcp.tool(
     name="steam_get_player_bans",
+    structured_output=False,
     annotations={
         "title": "Get Steam Player Bans",
         "readOnlyHint": True,
@@ -1512,6 +1528,7 @@ async def steam_get_player_bans(params: PlayerInput) -> str:
 
 @mcp.tool(
     name="steam_get_friend_list",
+    structured_output=False,
     annotations={
         "title": "Get Steam Friend List",
         "readOnlyHint": True,
@@ -1648,6 +1665,7 @@ async def _friend_owns_app(fid: str, appid: int) -> dict:
 
 @mcp.tool(
     name="steam_find_friends_who_own",
+    structured_output=False,
     annotations={
         "title": "Find Friends Who Own a Game",
         "readOnlyHint": True,
@@ -1760,6 +1778,7 @@ async def steam_find_friends_who_own(params: FriendsWhoOwnInput) -> str:
 
 @mcp.tool(
     name="steam_get_owned_games",
+    structured_output=False,
     annotations={
         "title": "Get Steam Owned Games",
         "readOnlyHint": True,
@@ -1856,6 +1875,7 @@ async def steam_get_owned_games(params: OwnedGamesInput) -> str:
 
 @mcp.tool(
     name="steam_get_recently_played_games",
+    structured_output=False,
     annotations={
         "title": "Get Steam Recently Played Games",
         "readOnlyHint": True,
@@ -1914,6 +1934,7 @@ async def steam_get_recently_played_games(params: PlayerInput) -> str:
 
 @mcp.tool(
     name="steam_get_player_achievements",
+    structured_output=False,
     annotations={
         "title": "Get Steam Player Achievements",
         "readOnlyHint": True,
@@ -1996,6 +2017,7 @@ async def steam_get_player_achievements(params: PlayerGameInput) -> str:
 
 @mcp.tool(
     name="steam_get_game_schema",
+    structured_output=False,
     annotations={
         "title": "Get Steam Game Schema",
         "readOnlyHint": True,
@@ -2055,6 +2077,7 @@ async def steam_get_game_schema(params: AppOnlyInput) -> str:
 
 @mcp.tool(
     name="steam_get_global_achievement_percentages",
+    structured_output=False,
     annotations={
         "title": "Get Global Achievement Rarity",
         "readOnlyHint": True,
@@ -2111,6 +2134,7 @@ async def steam_get_global_achievement_percentages(params: AppOnlyInput) -> str:
 
 @mcp.tool(
     name="steam_get_user_game_stats",
+    structured_output=False,
     annotations={
         "title": "Get Steam User Game Stats",
         "readOnlyHint": True,
@@ -2187,6 +2211,7 @@ class RarestUnlocksInput(PlayerGameInput):
 
 @mcp.tool(
     name="steam_get_rarest_unlocks",
+    structured_output=False,
     annotations={
         "title": "Get Player's Rarest Achievement Unlocks",
         "readOnlyHint": True,
@@ -2288,6 +2313,7 @@ async def steam_get_rarest_unlocks(params: RarestUnlocksInput) -> str:
 
 @mcp.tool(
     name="steam_search_apps",
+    structured_output=False,
     annotations={
         "title": "Search Steam Store Apps",
         "readOnlyHint": True,
@@ -2341,6 +2367,7 @@ async def steam_search_apps(params: AppSearchInput) -> str:
 
 @mcp.tool(
     name="steam_get_app_details",
+    structured_output=False,
     annotations={
         "title": "Get Steam App Details",
         "readOnlyHint": True,
@@ -2576,6 +2603,7 @@ class DlcInput(BaseModel):
 
 @mcp.tool(
     name="steam_get_dlc",
+    structured_output=False,
     annotations={
         "title": "Get Steam Game DLC",
         "readOnlyHint": True,
@@ -2708,6 +2736,7 @@ async def _tag_name_map() -> dict:
 
 @mcp.tool(
     name="steam_get_app_tags",
+    structured_output=False,
     annotations={
         "title": "Get Steam Community Tags",
         "readOnlyHint": True,
@@ -3069,6 +3098,7 @@ class DiscoverInput(BaseModel):
 
 @mcp.tool(
     name="steam_discover",
+    structured_output=False,
     annotations={
         "title": "Discover / Recommend Steam Games",
         "readOnlyHint": True,
@@ -3335,6 +3365,7 @@ async def _collect_recent_reviews(
 
 @mcp.tool(
     name="steam_get_app_reviews",
+    structured_output=False,
     annotations={
         "title": "Get Steam App Reviews & Rating",
         "readOnlyHint": True,
@@ -3580,12 +3611,22 @@ async def _app_prices(appids: list[int], cc: str = "us") -> dict[int, dict]:
                if a not in out or (not out[a]["price"] and not out[a]["is_free"])]
     if missing:
         fills = await _gather_limited([_app_price(a, cc) for a in missing])
-        out.update({p["appid"]: p for p in fills})
+        for p in fills:
+            # Merge, don't replace: the fallback has no release date, and a
+            # GetItems entry's release_ts is what the release-window filter in
+            # steam_discover keys on. Only take the fallback's known values, so a
+            # failed fallback (name/price None) can't blank what GetItems found.
+            prev = out.get(p["appid"])
+            out[p["appid"]] = (
+                {**prev, **{k: v for k, v in p.items() if v is not None}}
+                if prev else p
+            )
     return out
 
 
 @mcp.tool(
     name="steam_get_featured_specials",
+    structured_output=False,
     annotations={
         "title": "Get Steam Featured Sales/Specials",
         "readOnlyHint": True,
@@ -3634,6 +3675,7 @@ async def steam_get_featured_specials(params: FeaturedInput) -> str:
 
 @mcp.tool(
     name="steam_get_store_highlights",
+    structured_output=False,
     annotations={
         "title": "Get Steam Store Highlights",
         "readOnlyHint": True,
@@ -3703,6 +3745,7 @@ async def steam_get_store_highlights(params: StoreHighlightsInput) -> str:
 
 @mcp.tool(
     name="steam_get_wishlist",
+    structured_output=False,
     annotations={
         "title": "Get Steam Wishlist",
         "readOnlyHint": True,
@@ -3803,6 +3846,7 @@ async def steam_get_wishlist(params: WishlistInput) -> str:
 
 @mcp.tool(
     name="steam_get_current_players",
+    structured_output=False,
     annotations={
         "title": "Get Steam Live Player Count",
         "readOnlyHint": True,
@@ -3842,6 +3886,7 @@ async def steam_get_current_players(params: AppOnlyInput) -> str:
 
 @mcp.tool(
     name="steam_get_app_news",
+    structured_output=False,
     annotations={
         "title": "Get Steam App News/Updates",
         "readOnlyHint": True,
@@ -3953,6 +3998,7 @@ class ComparePlayersInput(BaseModel):
 
 @mcp.tool(
     name="steam_get_player_badges",
+    structured_output=False,
     annotations={
         "title": "Get Steam Player Badges",
         "readOnlyHint": True,
@@ -4030,6 +4076,7 @@ async def steam_get_player_badges(params: PlayerInput) -> str:
 
 @mcp.tool(
     name="steam_get_package_details",
+    structured_output=False,
     annotations={
         "title": "Get Steam Package/Bundle Details",
         "readOnlyHint": True,
@@ -4101,6 +4148,7 @@ async def steam_get_package_details(params: PackageDetailsInput) -> str:
 
 @mcp.tool(
     name="steam_compare_players",
+    structured_output=False,
     annotations={
         "title": "Compare Two Steam Players",
         "readOnlyHint": True,
@@ -4364,6 +4412,7 @@ class LibraryAnalysisInput(BaseModel):
 
 @mcp.tool(
     name="steam_analyze_library",
+    structured_output=False,
     annotations={
         "title": "Analyze Steam Library / Backlog",
         "readOnlyHint": True,
@@ -4631,6 +4680,7 @@ class ShouldIBuyInput(BaseModel):
 
 @mcp.tool(
     name="steam_should_i_buy",
+    structured_output=False,
     annotations={
         "title": "Steam Buying Brief (Should I Buy?)",
         "readOnlyHint": True, "destructiveHint": False,
@@ -4802,6 +4852,7 @@ class RecommendInput(BaseModel):
 
 @mcp.tool(
     name="steam_recommend",
+    structured_output=False,
     annotations={
         "title": "Recommend Steam Games (with reasons)",
         "readOnlyHint": True, "destructiveHint": False,
@@ -5030,6 +5081,7 @@ class PlanCoopNightInput(BaseModel):
 
 @mcp.tool(
     name="steam_plan_coop_night",
+    structured_output=False,
     annotations={
         "title": "Plan a Steam Co-op Night",
         "readOnlyHint": True, "destructiveHint": False,
@@ -5260,6 +5312,7 @@ class RegionalPricingInput(BaseModel):
 
 @mcp.tool(
     name="steam_get_app_regional_pricing",
+    structured_output=False,
     annotations={
         "title": "Get Steam Regional Pricing",
         "readOnlyHint": True, "destructiveHint": False,
@@ -5325,6 +5378,7 @@ class WorkshopItemInput(BaseModel):
 
 @mcp.tool(
     name="steam_get_workshop_item",
+    structured_output=False,
     annotations={
         "title": "Get Steam Workshop Item",
         "readOnlyHint": True, "destructiveHint": False,
@@ -5443,6 +5497,7 @@ async def _group_details(gid: str) -> dict:
 
 @mcp.tool(
     name="steam_get_user_groups",
+    structured_output=False,
     annotations={
         "title": "Get Steam User Groups",
         "readOnlyHint": True, "destructiveHint": False,
@@ -5534,6 +5589,7 @@ class InventoryInput(BaseModel):
 
 @mcp.tool(
     name="steam_get_inventory",
+    structured_output=False,
     annotations={
         "title": "Get Steam Inventory",
         "readOnlyHint": True, "destructiveHint": False,
@@ -5675,6 +5731,7 @@ class MarketPriceInput(BaseModel):
 
 @mcp.tool(
     name="steam_get_market_price",
+    structured_output=False,
     annotations={
         "title": "Get Steam Community Market Price",
         "readOnlyHint": True, "destructiveHint": False,
@@ -5949,7 +6006,100 @@ def _compact_descriptions() -> None:
                 pass
 
 
+# Schema keywords whose values are data, not subschemas — never walked for titles.
+_SCHEMA_DATA_KEYS = frozenset({"default", "enum", "const", "examples", "required"})
+# Keywords whose values map *names* to subschemas (a property may itself be
+# called "title", so the names must not be mistaken for keywords).
+_SCHEMA_NAME_MAPS = frozenset({"properties", "$defs", "definitions"})
+
+
+def _inline_enum_defs(schema: dict) -> None:
+    """Replace `$ref`s to enum-only `$defs` (e.g. ResponseFormat) with the enum.
+
+    Pydantic hoists every Enum into `$defs` and points at it by reference, so
+    each tool carried its own copy of the ResponseFormat block, description and
+    all. Inlined, the field keeps exactly what constrains it: type + enum.
+    """
+    defs = schema.get("$defs")
+    if not isinstance(defs, dict):
+        return
+    enums = {
+        f"#/$defs/{name}": {k: v for k, v in d.items()
+                            if k not in ("description", "title")}
+        for name, d in defs.items()
+        if isinstance(d, dict) and "enum" in d
+    }
+    if not enums:
+        return
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if ref in enums:
+                del node["$ref"]
+                for k, v in enums[ref].items():
+                    node.setdefault(k, v)
+            for key, value in node.items():
+                if key not in _SCHEMA_DATA_KEYS:
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(schema)
+    for ref in enums:
+        defs.pop(ref.rsplit("/", 1)[1], None)
+
+
+def _strip_schema_titles(node: Any) -> None:
+    """Drop the `title` keyword Pydantic auto-generates on every schema node.
+
+    They restate the property / model name ("steamid" -> "Steamid") and were
+    ~10% of the tools/list payload. Property *names* are left alone, even one
+    called "title".
+    """
+    if isinstance(node, dict):
+        node.pop("title", None)
+        for key, value in node.items():
+            if key in _SCHEMA_NAME_MAPS and isinstance(value, dict):
+                for sub in value.values():
+                    _strip_schema_titles(sub)
+            elif key not in _SCHEMA_DATA_KEYS:
+                _strip_schema_titles(value)
+    elif isinstance(node, list):
+        for item in node:
+            _strip_schema_titles(item)
+
+
+def _lean_schemas() -> None:
+    """Trim redundancy out of each tool's *wire* input schema.
+
+    Every input schema is sent to the model on every request, and Pydantic's
+    output carries a lot it doesn't need: an auto-generated title on every node
+    and a separate `$defs` entry for each enum. Removing both cuts the
+    model-visible tool definitions by about a quarter without touching a single
+    parameter name, type, default, constraint or description. Argument
+    validation runs against the Pydantic models, not this published copy.
+    Best-effort, like _compact_descriptions: if the SDK internals change, the
+    schemas simply stay as generated.
+    """
+    try:
+        tools = list(mcp._tool_manager._tools.values())
+    except Exception:  # noqa: BLE001
+        return
+    for tool in tools:
+        schema = getattr(tool, "parameters", None)
+        if not isinstance(schema, dict):
+            continue
+        try:
+            _inline_enum_defs(schema)
+            _strip_schema_titles(schema)
+        except Exception:  # noqa: BLE001
+            continue
+
+
 _compact_descriptions()
+_lean_schemas()
 
 
 def main() -> None:

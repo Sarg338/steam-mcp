@@ -41,10 +41,11 @@ from steam_mcp.server import mcp  # noqa: E402
 # --- Budgets (fail the audit if exceeded) -------------------------------------
 # Baselined to the current footprint plus modest headroom. The defs total is
 # dominated by the input SCHEMAS (Pydantic Field descriptions), not the top-level
-# tool descriptions (_compact_descriptions already trims those). If you trim the
-# schemas later, re-run and lower DEFS_TOKEN_BUDGET to the new baseline so the gate
-# stays meaningful.
-DEFS_TOKEN_BUDGET = 15_000    # all tool defs on the wire (baseline ~13.9k)
+# tool descriptions (_compact_descriptions already trims those; _lean_schemas
+# strips the auto-generated titles and inlines enum $defs). If you trim further,
+# re-run and lower DEFS_TOKEN_BUDGET to the new baseline so the gate stays
+# meaningful.
+DEFS_TOKEN_BUDGET = 12_000    # all tool defs on the wire (baseline ~11.1k)
 PER_TOOL_TOKEN_WARN = 700     # flag a single tool def that's an outlier
 RESPONSE_HARD_CAP = 25_000    # Anthropic's per-response guidance (hard fail)
 RESPONSE_WARN = 20_000        # warn band approaching the cap

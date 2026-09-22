@@ -2464,3 +2464,106 @@ def test_readme_key_column_matches_the_code():
         else:
             assert name not in S.KEYLESS_TOOLS and name not in S.PARTLY_KEYLESS_TOOLS, (
                 f"{name} documented as needing a key, but runs without one")
+
+
+# --------------------------------------------------------------------------- #
+# Token footprint: lean schemas, no duplicated structured output, compact JSON
+# --------------------------------------------------------------------------- #
+
+def _schema_keywords(node, found=None):
+    """Collect every schema *keyword* used (property names excluded)."""
+    found = set() if found is None else found
+    if isinstance(node, dict):
+        for key, value in node.items():
+            found.add(key)
+            if key in ("properties", "$defs") and isinstance(value, dict):
+                for sub in value.values():
+                    _schema_keywords(sub, found)
+            elif key not in ("default", "enum", "required"):
+                _schema_keywords(value, found)
+    elif isinstance(node, list):
+        for item in node:
+            _schema_keywords(item, found)
+    return found
+
+
+def test_tool_schemas_are_lean():
+    for t in run(S.mcp.list_tools()):
+        schema = _wire(t)["inputSchema"]
+        assert "title" not in _schema_keywords(schema), t.name
+        assert "ResponseFormat" not in schema.get("$defs", {}), t.name
+        # the enum is inlined where it's used, still fully constraining the field
+        (model,) = schema["$defs"].values()
+        rf = model["properties"]["response_format"]
+        assert rf["enum"] == ["markdown", "json"] and rf["default"] == "markdown"
+        # nothing a caller relies on went missing
+        assert schema["required"] == ["params"], t.name
+        for prop in model["properties"].values():
+            assert "type" in prop or "anyOf" in prop, t.name
+
+
+def test_lean_schemas_is_idempotent_and_keeps_params():
+    before = {t.name: _wire(t)["inputSchema"] for t in run(S.mcp.list_tools())}
+    S._lean_schemas()
+    after = {t.name: _wire(t)["inputSchema"] for t in run(S.mcp.list_tools())}
+    assert before == after
+    props = after["steam_discover"]["$defs"]["DiscoverInput"]["properties"]
+    assert props["limit"] == {"default": 15, "description": "Max results to return (1-50).",
+                              "maximum": 50, "minimum": 1, "type": "integer"}
+
+
+def test_strip_titles_leaves_a_property_named_title():
+    schema = {"title": "M", "type": "object",
+              "properties": {"title": {"title": "Title", "type": "string"}}}
+    S._strip_schema_titles(schema)
+    assert schema == {"type": "object", "properties": {"title": {"type": "string"}}}
+
+
+def test_tools_declare_no_output_schema_and_send_text_once(monkeypatch):
+    for t in run(S.mcp.list_tools()):
+        assert _wire(t).get("outputSchema") is None, t.name
+
+    async def fake(path, params, **k):
+        return {"response": {"player_count": 1234, "result": 1}}
+
+    monkeypatch.setattr(S, "_steam_get", fake)
+    res = run(S.mcp.call_tool("steam_get_current_players", {"params": {"appid": 730}}))
+    # v1 returns (content, structured) as a tuple only when structured output is on
+    assert not isinstance(res, tuple)
+    assert getattr(res, "structured_content", None) is None
+
+
+def test_json_responses_are_compact():
+    out = S._dump({"a": [1, 2], "b": {"c": "é"}})
+    assert out == '{"a":[1,2],"b":{"c":"é"}}'
+
+
+def test_app_prices_fallback_keeps_the_release_date(monkeypatch):
+    # GetItems knows 20's release date but has no price for it (paid, unpriced):
+    # the appdetails fallback fills the price and must not erase release_ts, or
+    # steam_discover's release window silently drops the game.
+    async def fake_steam(path, params, with_key=True, cache_ttl=0):
+        return {"response": {"store_items": [
+            {"appid": 20, "name": "Unpriced", "is_free": False,
+             "best_purchase_option": {}, "release": {"steam_release_date": 1700000000}},
+            {"appid": 21, "name": "KeepMyName", "is_free": False,
+             "best_purchase_option": {}, "release": {"steam_release_date": 1700000001}},
+        ]}}
+
+    async def fake_app_price(appid, cc):
+        if appid == 20:
+            return {"appid": 20, "name": "Unpriced", "is_free": False,
+                    "price": "$19.99", "price_cents": 1999,
+                    "discount_pct": 0, "on_sale": False}
+        # a failed fallback: nothing known
+        return {"appid": appid, "name": None, "price": None, "is_free": False,
+                "on_sale": False, "discount_pct": 0}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(S, "_app_price", fake_app_price)
+
+    pm = run(S._app_prices([20, 21], "us"))
+    assert pm[20]["price"] == "$19.99" and pm[20]["price_cents"] == 1999
+    assert pm[20]["release_ts"] == 1700000000
+    assert pm[21]["name"] == "KeepMyName"          # not blanked by the failed fill
+    assert pm[21]["release_ts"] == 1700000001
