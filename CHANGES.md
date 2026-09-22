@@ -4,7 +4,7 @@ A concise, one-line-per-change history. Versions follow
 [Semantic Versioning](https://semver.org/). Releases:
 <https://github.com/Sarg338/steam-mcp/releases>
 
-## [Unreleased]
+## [1.15.0]
 - **Fixed: `steam_discover` threw away your `sort` whenever you used `released_within_days`.** Steam has no server-side date filter, so the window was enumerated newest-first and the sort was force-overridden to match — meaning "well-reviewed games from the last year" returned days-old unreviewed releases. The window is now enumerated newest-first across up to 3 search pages (stopping at the first pre-window release) and then **re-ranked client-side by the sort you asked for**, with a review-volume guard so a game with four glowing reviews doesn't outrank an established 90%-positive one and unreviewed games rank last. Review percentage and count are parsed out of the search HTML that was already being fetched, so this costs no extra requests.
 - **Fixed: the release-window filter ran *after* the limit slice**, so `released_within_days` with `limit=20` returned only however many of the first 20 results happened to fall inside the window — frequently none, even with plenty of matches further down. The window is now applied across the whole candidate set before the slice.
 - **Fixed: `steam_recommend` ignored your seed game if you also passed a `steamid`.** Basis precedence was tags > taste > seed, and the `steamid` is exactly what you must pass to get the ownership exclusion — so "games like Hades that I don't own" silently recommended from your most-played genres instead of from Hades. Precedence is now tags > seed > taste; a `steamid` always contributes the ownership exclusion and only seeds the tags when nothing else was given.
