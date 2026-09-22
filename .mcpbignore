@@ -37,6 +37,7 @@ _pack_only.bat
 .mypy_cache/
 .pytest_cache/
 PUBLISHING.md
+RELEASING.md
 
 # Internal working notes — not for the distributed bundle (CHANGES.md is the
 # tracked, condensed changelog that ships instead of the detailed CHANGELOG.md)
