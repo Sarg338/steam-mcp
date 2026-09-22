@@ -1894,8 +1894,8 @@ def test_user_game_stats(monkeypatch):
 
     monkeypatch.setattr(S, "_steam_get", fake_steam)
     out = run(S.steam_get_user_game_stats(
-        S.PlayerGameInput(steamid="76561197960287930", appid=440,
-                          response_format="json")))
+        S.UserGameStatsInput(steamid="76561197960287930", appid=440,
+                             response_format="json")))
     d = json.loads(out)
     assert d["game"] == "TF2" and d["stat_count"] == 2
     assert d["stats"][0] == {"name": "kills", "value": 100}
@@ -1907,7 +1907,7 @@ def test_user_game_stats_empty(monkeypatch):
 
     monkeypatch.setattr(S, "_steam_get", fake_steam)
     out = run(S.steam_get_user_game_stats(
-        S.PlayerGameInput(steamid="76561197960287930", appid=1)))
+        S.UserGameStatsInput(steamid="76561197960287930", appid=1)))
     assert "No stats available" in out
 
 
@@ -1993,7 +1993,7 @@ def test_global_achievement_percentages_tolerate_string_percents(monkeypatch):
 
     monkeypatch.setattr(S, "_steam_get", fake_steam)
     out = run(S.steam_get_global_achievement_percentages(
-        S.AppOnlyInput(appid=1, response_format="json")))
+        S.GlobalAchievementsInput(appid=1, response_format="json")))
     rows = json.loads(out)["achievements"]
     assert [r["global_pct"] for r in rows] == [0.0, 0.0, 5.0, 80.13]
     assert {r["api_name"] for r in rows} == {"A", "B", "C", "D"}
@@ -2464,3 +2464,202 @@ def test_readme_key_column_matches_the_code():
         else:
             assert name not in S.KEYLESS_TOOLS and name not in S.PARTLY_KEYLESS_TOOLS, (
                 f"{name} documented as needing a key, but runs without one")
+
+
+# --------------------------------------------------------------------------- #
+# Token footprint: lean schemas, no duplicated structured output, compact JSON
+# --------------------------------------------------------------------------- #
+
+def _schema_keywords(node, found=None):
+    """Collect every schema *keyword* used (property names excluded)."""
+    found = set() if found is None else found
+    if isinstance(node, dict):
+        for key, value in node.items():
+            found.add(key)
+            if key in ("properties", "$defs") and isinstance(value, dict):
+                for sub in value.values():
+                    _schema_keywords(sub, found)
+            elif key not in ("default", "enum", "required"):
+                _schema_keywords(value, found)
+    elif isinstance(node, list):
+        for item in node:
+            _schema_keywords(item, found)
+    return found
+
+
+def test_tool_schemas_are_lean():
+    for t in run(S.mcp.list_tools()):
+        schema = _wire(t)["inputSchema"]
+        assert "title" not in _schema_keywords(schema), t.name
+        assert "ResponseFormat" not in schema.get("$defs", {}), t.name
+        # the enum is inlined where it's used, still fully constraining the field
+        (model,) = schema["$defs"].values()
+        rf = model["properties"]["response_format"]
+        assert rf["enum"] == ["markdown", "json"] and rf["default"] == "markdown"
+        # nothing a caller relies on went missing
+        assert schema["required"] == ["params"], t.name
+        for prop in model["properties"].values():
+            assert "type" in prop or "anyOf" in prop, t.name
+
+
+def test_lean_schemas_is_idempotent_and_keeps_params():
+    before = {t.name: _wire(t)["inputSchema"] for t in run(S.mcp.list_tools())}
+    S._lean_schemas()
+    after = {t.name: _wire(t)["inputSchema"] for t in run(S.mcp.list_tools())}
+    assert before == after
+    props = after["steam_discover"]["$defs"]["DiscoverInput"]["properties"]
+    assert props["limit"] == {"default": 15, "description": "Max results to return (1-50).",
+                              "maximum": 50, "minimum": 1, "type": "integer"}
+
+
+def test_strip_titles_leaves_a_property_named_title():
+    schema = {"title": "M", "type": "object",
+              "properties": {"title": {"title": "Title", "type": "string"}}}
+    S._strip_schema_titles(schema)
+    assert schema == {"type": "object", "properties": {"title": {"type": "string"}}}
+
+
+def test_tools_declare_no_output_schema_and_send_text_once(monkeypatch):
+    for t in run(S.mcp.list_tools()):
+        assert _wire(t).get("outputSchema") is None, t.name
+
+    async def fake(path, params, **k):
+        return {"response": {"player_count": 1234, "result": 1}}
+
+    monkeypatch.setattr(S, "_steam_get", fake)
+    res = run(S.mcp.call_tool("steam_get_current_players", {"params": {"appid": 730}}))
+    # v1 returns (content, structured) as a tuple only when structured output is on
+    assert not isinstance(res, tuple)
+    assert getattr(res, "structured_content", None) is None
+
+
+def test_json_responses_are_compact():
+    out = S._dump({"a": [1, 2], "b": {"c": "é"}})
+    assert out == '{"a":[1,2],"b":{"c":"é"}}'
+
+
+def test_app_prices_fallback_keeps_the_release_date(monkeypatch):
+    # GetItems knows 20's release date but has no price for it (paid, unpriced):
+    # the appdetails fallback fills the price and must not erase release_ts, or
+    # steam_discover's release window silently drops the game.
+    async def fake_steam(path, params, with_key=True, cache_ttl=0):
+        return {"response": {"store_items": [
+            {"appid": 20, "name": "Unpriced", "is_free": False,
+             "best_purchase_option": {}, "release": {"steam_release_date": 1700000000}},
+            {"appid": 21, "name": "KeepMyName", "is_free": False,
+             "best_purchase_option": {}, "release": {"steam_release_date": 1700000001}},
+        ]}}
+
+    async def fake_app_price(appid, cc):
+        if appid == 20:
+            return {"appid": 20, "name": "Unpriced", "is_free": False,
+                    "price": "$19.99", "price_cents": 1999,
+                    "discount_pct": 0, "on_sale": False}
+        # a failed fallback: nothing known
+        return {"appid": appid, "name": None, "price": None, "is_free": False,
+                "on_sale": False, "discount_pct": 0}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(S, "_app_price", fake_app_price)
+
+    pm = run(S._app_prices([20, 21], "us"))
+    assert pm[20]["price"] == "$19.99" and pm[20]["price_cents"] == 1999
+    assert pm[20]["release_ts"] == 1700000000
+    assert pm[21]["name"] == "KeepMyName"          # not blanked by the failed fill
+    assert pm[21]["release_ts"] == 1700000001
+
+
+# Every list a JSON response carries is bounded by a `limit`, reports the full
+# count, and says when it was cut — so no response can outgrow the per-result
+# token budget, and the model knows to ask for more.
+
+def test_player_achievements_locked_list_is_capped(monkeypatch):
+    achs = [{"apiname": f"A{i}", "name": f"Ach {i}", "achieved": int(i < 10)}
+            for i in range(400)]
+
+    async def fake_steam(path, params, **k):
+        return {"playerstats": {"success": True, "gameName": "Big",
+                                "achievements": achs}}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    d = json.loads(run(S.steam_get_player_achievements(S.PlayerAchievementsInput(
+        steamid="76561197960287930", appid=1, response_format="json"))))
+    assert d["total"] == 400 and d["unlocked"] == 10
+    assert len(d["locked"]) == 50 and d["locked_truncated"] is True
+    d = json.loads(run(S.steam_get_player_achievements(S.PlayerAchievementsInput(
+        steamid="76561197960287930", appid=1, limit=300, response_format="json"))))
+    assert len(d["locked"]) == 300 and d["locked_truncated"] is True
+    md = run(S.steam_get_player_achievements(S.PlayerAchievementsInput(
+        steamid="76561197960287930", appid=1, limit=20)))
+    assert "…and 370 more" in md
+
+
+def test_game_schema_list_is_capped(monkeypatch):
+    async def fake_steam(path, params, **k):
+        return {"game": {"gameName": "Big", "availableGameStats": {"achievements": [
+            {"name": f"A{i}", "displayName": f"Ach {i}", "description": "d"}
+            for i in range(300)]}}}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    d = json.loads(run(S.steam_get_game_schema(
+        S.GameSchemaInput(appid=1, response_format="json"))))
+    assert d["achievement_count"] == 300
+    assert len(d["achievements"]) == 100 and d["truncated"] is True
+    d = json.loads(run(S.steam_get_game_schema(
+        S.GameSchemaInput(appid=1, limit=250, response_format="json"))))
+    assert len(d["achievements"]) == 250
+
+
+def test_global_achievements_list_is_capped(monkeypatch):
+    async def fake_steam(path, params, **k):
+        return {"achievementpercentages": {"achievements": [
+            {"name": f"A{i}", "percent": i / 10} for i in range(120)]}}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    d = json.loads(run(S.steam_get_global_achievement_percentages(
+        S.GlobalAchievementsInput(appid=1, response_format="json"))))
+    assert d["achievement_count"] == 120 and d["truncated"] is True
+    assert [r["api_name"] for r in d["achievements"]] == [f"A{i}" for i in range(50)]
+    d = json.loads(run(S.steam_get_global_achievement_percentages(
+        S.GlobalAchievementsInput(appid=1, limit=500, response_format="json"))))
+    assert len(d["achievements"]) == 120 and d["truncated"] is False
+
+
+def test_user_game_stats_list_is_capped(monkeypatch):
+    async def fake_steam(path, params, **k):
+        return {"playerstats": {"gameName": "G", "stats": [
+            {"name": f"s{i}", "value": i} for i in range(150)]}}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    d = json.loads(run(S.steam_get_user_game_stats(S.UserGameStatsInput(
+        steamid="76561197960287930", appid=1, response_format="json"))))
+    assert d["stat_count"] == 150
+    assert len(d["stats"]) == 100 and d["truncated"] is True
+
+
+def test_inventory_item_list_is_capped(monkeypatch):
+    n = 120
+
+    async def fake_raw(url, params, cache_ttl=0):
+        return {"success": 1, "total_inventory_count": n,
+                "assets": [{"classid": str(i), "instanceid": "0", "amount": "1"}
+                           for i in range(n)],
+                "descriptions": [{"classid": str(i), "instanceid": "0",
+                                  "name": f"Item {i}"} for i in range(n)]}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    d = json.loads(run(S.steam_get_inventory(S.InventoryInput(
+        steamid="76561197960287930", response_format="json"))))
+    assert d["distinct_items"] == n
+    assert len(d["items"]) == 50 and d["truncated"] is True
+    md = run(S.steam_get_inventory(S.InventoryInput(
+        steamid="76561197960287930", limit=10)))
+    assert f"{n} distinct, showing 10." in md and "…and 110 more distinct" in md
+
+
+def test_annotations_are_minimal_and_read_only():
+    for t in run(S.mcp.list_tools()):
+        ann = _wire(t)["annotations"]
+        assert ann["readOnlyHint"] is True, t.name
+        assert ann.get("title"), t.name
+        assert {k for k, v in ann.items() if v is not None} == {"title", "readOnlyHint"}

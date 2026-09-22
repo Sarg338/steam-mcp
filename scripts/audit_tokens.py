@@ -41,10 +41,11 @@ from steam_mcp.server import mcp  # noqa: E402
 # --- Budgets (fail the audit if exceeded) -------------------------------------
 # Baselined to the current footprint plus modest headroom. The defs total is
 # dominated by the input SCHEMAS (Pydantic Field descriptions), not the top-level
-# tool descriptions (_compact_descriptions already trims those). If you trim the
-# schemas later, re-run and lower DEFS_TOKEN_BUDGET to the new baseline so the gate
-# stays meaningful.
-DEFS_TOKEN_BUDGET = 15_000    # all tool defs on the wire (baseline ~13.9k)
+# tool descriptions (_compact_descriptions already trims those; _lean_schemas
+# strips the auto-generated titles and inlines enum $defs). If you trim further,
+# re-run and lower DEFS_TOKEN_BUDGET to the new baseline so the gate stays
+# meaningful.
+DEFS_TOKEN_BUDGET = 11_500    # all tool defs on the wire (baseline ~10.6k)
 PER_TOOL_TOKEN_WARN = 700     # flag a single tool def that's an outlier
 RESPONSE_HARD_CAP = 25_000    # Anthropic's per-response guidance (hard fail)
 RESPONSE_WARN = 20_000        # warn band approaching the cap
@@ -117,9 +118,10 @@ def _run_tool(coro_fn, inp):
 
 
 def _scenarios() -> list:
-    """(label, {markdown, json}) for the tools whose output scales with library
-    size — the genuine response-bloat risk. Other tools are bounded by small
-    per-item limits or per-field truncation."""
+    """(label, {markdown, json}) for the tools whose output scales with the size
+    of a library, a game's achievement/stat list, or an inventory — the genuine
+    response-bloat risk. Other tools are bounded by small per-item limits or
+    per-field truncation."""
     owned200 = {"response": {"game_count": 200, "games": _games(200)}}
     owned200_played = {"response": {"game_count": 200,
                                     "games": _games(200, never_frac=0.0)}}
@@ -160,6 +162,70 @@ def _scenarios() -> list:
                 steamid_a="76561197960287930", steamid_b="76561197960287931",
                 limit=100, response_format=fmt))
         out.append(("steam_compare_players (limit=100)", res))
+
+    # 4-8. Tools whose lists scale with the game / inventory rather than the
+    # library, each at its maximum `limit` against a payload larger than it.
+    long_desc = "Complete the final chapter on the hardest difficulty without " \
+                "taking any damage from bosses or using consumable items."  # ~120c
+    many_ach = [{"apiname": f"ACH_EXAMPLE_ACHIEVEMENT_{i:04d}",
+                 "name": f"Example Achievement Title Number {i}",
+                 "description": long_desc, "achieved": 0} for i in range(1000)]
+
+    async def fake_player_ach(path, params, **k):
+        return {"playerstats": {"success": True, "gameName": "Example Game",
+                                "achievements": many_ach}}
+
+    async def fake_schema(path, params, **k):
+        return {"game": {"gameName": "Example Game", "availableGameStats": {
+            "achievements": [{"name": a["apiname"], "displayName": a["name"],
+                              "description": long_desc, "hidden": 0}
+                             for a in many_ach]}}}
+
+    async def fake_global(path, params, **k):
+        return {"achievementpercentages": {"achievements": [
+            {"name": a["apiname"], "percent": i / 7}
+            for i, a in enumerate(many_ach)]}}
+
+    async def fake_stats(path, params, **k):
+        return {"playerstats": {"gameName": "Example Game", "stats": [
+            {"name": f"stat_example_counter_name_{i:04d}", "value": i * 1234}
+            for i in range(1000)]}}
+
+    async def fake_inventory(url, params, cache_ttl=0):
+        n = 2000
+        return {"success": 1, "total_inventory_count": n,
+                "assets": [{"classid": str(i), "instanceid": "0", "amount": "1"}
+                           for i in range(n)],
+                "descriptions": [{"classid": str(i), "instanceid": "0",
+                                  "market_name": f"Example Trading Card Item {i} (Foil)",
+                                  "type": "Example Game Foil Trading Card",
+                                  "tradable": 1, "marketable": 1}
+                                 for i in range(n)]}
+
+    sid = "76561197960287930"
+    for label, patch, fn, make in (
+        ("steam_get_player_achievements (limit=300)",
+         {"_steam_get": fake_player_ach}, S.steam_get_player_achievements,
+         lambda f: S.PlayerAchievementsInput(steamid=sid, appid=1, limit=300,
+                                             response_format=f)),
+        ("steam_get_game_schema (limit=250)",
+         {"_steam_get": fake_schema}, S.steam_get_game_schema,
+         lambda f: S.GameSchemaInput(appid=1, limit=250, response_format=f)),
+        ("steam_get_global_achievement_pct (limit=500)",
+         {"_steam_get": fake_global}, S.steam_get_global_achievement_percentages,
+         lambda f: S.GlobalAchievementsInput(appid=1, limit=500, response_format=f)),
+        ("steam_get_user_game_stats (limit=500)",
+         {"_steam_get": fake_stats}, S.steam_get_user_game_stats,
+         lambda f: S.UserGameStatsInput(steamid=sid, appid=1, limit=500,
+                                        response_format=f)),
+        ("steam_get_inventory (2000 items, limit=200)",
+         {"_raw_get": fake_inventory}, S.steam_get_inventory,
+         lambda f: S.InventoryInput(steamid=sid, count=2000, limit=200,
+                                    response_format=f)),
+    ):
+        with _patch(**patch):
+            res = {f: _run_tool(fn, make(f)) for f in ("markdown", "json")}
+        out.append((label, res))
 
     return out
 
