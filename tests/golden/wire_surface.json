@@ -73,13 +73,105 @@
   "tools": [
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
+        "readOnlyHint": true,
+        "title": "Analyze a Steam Game's Reviews"
+      },
+      "description": "Analyze thousands of a game's reviews: sentiment over time, by language, playtime, Deck, key vs Steam purchase, dev replies.",
+      "inputSchema": {
+        "$defs": {
+          "ReviewAnalysisInput": {
+            "additionalProperties": false,
+            "properties": {
+              "appid": {
+                "description": "Steam application (game) ID.",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "country_code": {
+                "default": "us",
+                "maxLength": 2,
+                "minLength": 2,
+                "type": "string"
+              },
+              "cursor": {
+                "default": "*",
+                "description": "Resume from a previous result's next_cursor; '*' (default) starts at the newest review.",
+                "maxLength": 512,
+                "minLength": 1,
+                "type": "string"
+              },
+              "day_range": {
+                "anyOf": [
+                  {
+                    "maximum": 3650,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Only reviews from the last N days (1-3650); the scan stops at that edge. Omit to go back as far as max_reviews allows."
+              },
+              "language": {
+                "default": "all",
+                "description": "A Steam language name (e.g. 'english'), or 'all' (default) to include every language and break them down.",
+                "maxLength": 32,
+                "minLength": 2,
+                "type": "string"
+              },
+              "max_reviews": {
+                "default": 2000,
+                "description": "Reviews to analyze, newest first (100-20000). Every 100 is one request to Steam, so 20000 takes a minute or two.",
+                "maximum": 20000,
+                "minimum": 100,
+                "type": "integer"
+              },
+              "purchase_type": {
+                "default": "all",
+                "description": "'all' (default, so Steam purchases and key activations can be compared), 'steam', or 'store' (the store page's population).",
+                "type": "string"
+              },
+              "response_format": {
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
+              },
+              "samples": {
+                "default": 2,
+                "description": "Example reviews kept per group: newest and most helpful, positive and negative (0-5).",
+                "maximum": 5,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "appid"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "params": {
+            "$ref": "#/$defs/ReviewAnalysisInput"
+          }
+        },
+        "required": [
+          "params"
+        ],
+        "type": "object"
+      },
+      "name": "steam_analyze_app_reviews"
+    },
+    {
+      "annotations": {
         "readOnlyHint": true,
         "title": "Analyze Steam Library / Backlog"
       },
-      "description": "Analyze a whole game library: backlog, playtime distribution, abandoned games. [unavailable: needs STEAM_API_KEY]",
+      "description": "Analyze a whole game library: backlog, playtime distribution, abandoned games.",
       "inputSchema": {
         "$defs": {
           "LibraryAnalysisInput": {
@@ -90,13 +182,11 @@
                 "description": "How many 'abandoned' games to list (0-100). Independent of backlog_limit; ordered by abandoned_sort.",
                 "maximum": 100,
                 "minimum": 0,
-                "title": "Abandoned Limit",
                 "type": "integer"
               },
               "abandoned_sort": {
                 "default": "recent",
                 "description": "Order for the abandoned list: 'recent' (most recently dropped first — the most actionable to resume), 'oldest' (longest-dropped first), or 'playtime' (most hours sunk first).",
-                "title": "Abandoned Sort",
                 "type": "string"
               },
               "backlog_limit": {
@@ -104,25 +194,26 @@
                 "description": "How many never-played games to list (0-100). Defaults to the max so 'what should I play' sees the whole backlog, not an alphabetical slice of it.",
                 "maximum": 100,
                 "minimum": 0,
-                "title": "Backlog Limit",
                 "type": "integer"
               },
               "exclude_temp_clients": {
                 "default": true,
                 "description": "Exclude non-retail clients (betas, playtests, demos, trials, test servers, staging branches, prototypes) — they're often unlaunchable, so they pollute 'what to play next'. Detected by name; the excluded count is always reported. Set false to include them in every stat and list.",
-                "title": "Exclude Temp Clients",
                 "type": "boolean"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               },
               "stale_days": {
                 "default": 365,
                 "description": "A played game untouched for at least this many days is counted as 'abandoned' (30-3650).",
                 "maximum": 3650,
                 "minimum": 30,
-                "title": "Stale Days",
                 "type": "integer"
               },
               "steamid": {
@@ -135,30 +226,17 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "SteamID64, vanity name, or profile URL of the library owner. Omit to use the configured STEAM_USER, if set.",
-                "title": "Steamid"
+                "description": "SteamID64, vanity name, or profile URL of the library owner. Omit to use the configured STEAM_USER, if set."
               },
               "top_limit": {
                 "default": 10,
                 "description": "How many most-played games to list (1-50).",
                 "maximum": 50,
                 "minimum": 1,
-                "title": "Top Limit",
                 "type": "integer"
               }
             },
-            "title": "LibraryAnalysisInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -169,33 +247,16 @@
         "required": [
           "params"
         ],
-        "title": "steam_analyze_libraryArguments",
         "type": "object"
       },
-      "name": "steam_analyze_library",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_analyze_libraryOutput",
-        "type": "object"
-      }
+      "name": "steam_analyze_library"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Compare Two Steam Players"
       },
-      "description": "Compare two users' libraries: shared games and who has played each more. [unavailable: needs STEAM_API_KEY]",
+      "description": "Compare two users' libraries: shared games and who has played each more.",
       "inputSchema": {
         "$defs": {
           "ComparePlayersInput": {
@@ -206,12 +267,15 @@
                 "description": "Max shared games to list, ordered by combined playtime (1-100).",
                 "maximum": 100,
                 "minimum": 1,
-                "title": "Limit",
                 "type": "integer"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               },
               "steamid_a": {
                 "anyOf": [
@@ -223,32 +287,19 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "First user: SteamID64, vanity name, or profile URL. Omit to use the configured STEAM_USER, if set.",
-                "title": "Steamid A"
+                "description": "First user: SteamID64, vanity name, or profile URL. Omit to use the configured STEAM_USER, if set."
               },
               "steamid_b": {
                 "description": "Second user: SteamID64, vanity name, or profile URL.",
                 "maxLength": 200,
                 "minLength": 1,
-                "title": "Steamid B",
                 "type": "string"
               }
             },
             "required": [
               "steamid_b"
             ],
-            "title": "ComparePlayersInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -259,33 +310,16 @@
         "required": [
           "params"
         ],
-        "title": "steam_compare_playersArguments",
         "type": "object"
       },
-      "name": "steam_compare_players",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_compare_playersOutput",
-        "type": "object"
-      }
+      "name": "steam_compare_players"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Discover / Recommend Steam Games"
       },
-      "description": "Discover games by criteria — tags, max price, on-sale, platform — optionally personalized to a user's taste; for filter-based search, not \"games like X\" (use steam_recommend for that). [works without a key unless you pass steamid]",
+      "description": "Discover games by criteria — tags, max price, on-sale, platform — optionally personalized to a user's taste; for filter-based search, not \"games like X\" (use steam_recommend for that).",
       "inputSchema": {
         "$defs": {
           "DiscoverInput": {
@@ -295,13 +329,11 @@
                 "default": "us",
                 "maxLength": 2,
                 "minLength": 2,
-                "title": "Country Code",
                 "type": "string"
               },
               "exclude_owned": {
                 "default": true,
                 "description": "When steamid is set, hide games the user already owns.",
-                "title": "Exclude Owned",
                 "type": "boolean"
               },
               "limit": {
@@ -309,7 +341,6 @@
                 "description": "Max results to return (1-50).",
                 "maximum": 50,
                 "minimum": 1,
-                "title": "Limit",
                 "type": "integer"
               },
               "max_price": {
@@ -323,14 +354,11 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "Maximum price in the country's currency units (e.g. 30 = $30 for country_code='us'). Omit for any price.",
-                "title": "Max Price"
+                "description": "Maximum price in the country's currency units (e.g. 30 = $30 for country_code='us'). Omit for any price."
               },
               "on_sale": {
                 "default": false,
                 "description": "Only games currently on sale.",
-                "title": "On Sale",
                 "type": "boolean"
               },
               "platform": {
@@ -342,9 +370,7 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "Filter by OS: 'win', 'mac', or 'linux'.",
-                "title": "Platform"
+                "description": "Filter by OS: 'win', 'mac', or 'linux'."
               },
               "released_within_days": {
                 "anyOf": [
@@ -357,18 +383,19 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "Only include games released in the last N days, ordered by `sort` within that window. Use for 'what came out recently' or 'well-reviewed games from the last year'. Omit for any release date.",
-                "title": "Released Within Days"
+                "description": "Only include games released in the last N days, ordered by `sort` within that window. Use for 'what came out recently' or 'well-reviewed games from the last year'. Omit for any release date."
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               },
               "sort": {
                 "default": "reviews",
                 "description": "Order: 'reviews' (best-reviewed first, default), 'release' (newest), 'price_asc', 'price_desc', or 'relevance'.",
-                "title": "Sort",
                 "type": "string"
               },
               "steamid": {
@@ -381,9 +408,7 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "Optional. If set, personalize: seed tags from this user's most-played + recently-played games and (by default) exclude games they own. SteamID64, vanity name, or profile URL.",
-                "title": "Steamid"
+                "description": "Optional. If set, personalize: seed tags from this user's most-played + recently-played games and (by default) exclude games they own. SteamID64, vanity name, or profile URL."
               },
               "tags": {
                 "description": "Community tag names to require (AND), e.g. ['Roguelike', 'Co-op']. Resolved to Steam tag IDs; unknown names are reported and ignored.",
@@ -391,7 +416,6 @@
                   "type": "string"
                 },
                 "maxItems": 10,
-                "title": "Tags",
                 "type": "array"
               },
               "term": {
@@ -404,22 +428,10 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "Optional free-text title/keyword to search.",
-                "title": "Term"
+                "description": "Optional free-text title/keyword to search."
               }
             },
-            "title": "DiscoverInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -430,33 +442,16 @@
         "required": [
           "params"
         ],
-        "title": "steam_discoverArguments",
         "type": "object"
       },
-      "name": "steam_discover",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_discoverOutput",
-        "type": "object"
-      }
+      "name": "steam_discover"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Find Friends Who Own a Game"
       },
-      "description": "List which of a user's friends own (or are playing) a specific game — \"who can I play X with\" (about friends' libraries, not store search). [unavailable: needs STEAM_API_KEY]",
+      "description": "List which of a user's friends own (or are playing) a specific game — \"who can I play X with\" (about friends' libraries, not store search).",
       "inputSchema": {
         "$defs": {
           "FriendsWhoOwnInput": {
@@ -465,7 +460,6 @@
               "appid": {
                 "description": "The game (appid) to check friends' ownership of.",
                 "minimum": 1,
-                "title": "Appid",
                 "type": "integer"
               },
               "limit": {
@@ -473,7 +467,6 @@
                 "description": "Max owners to list (1-100).",
                 "maximum": 100,
                 "minimum": 1,
-                "title": "Limit",
                 "type": "integer"
               },
               "max_friends": {
@@ -481,18 +474,20 @@
                 "description": "How many friends to check for ownership (1-250). Each is one concurrent owned-games lookup; raise for completeness, lower for speed.",
                 "maximum": 250,
                 "minimum": 1,
-                "title": "Max Friends",
                 "type": "integer"
               },
               "playing_now": {
                 "default": false,
                 "description": "If true, list only friends currently in-game in this title now.",
-                "title": "Playing Now",
                 "type": "boolean"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               },
               "steamid": {
                 "anyOf": [
@@ -504,25 +499,13 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "The user whose friends to check: SteamID64, vanity, or URL. Omit to use the configured STEAM_USER, if set.",
-                "title": "Steamid"
+                "description": "The user whose friends to check: SteamID64, vanity, or URL. Omit to use the configured STEAM_USER, if set."
               }
             },
             "required": [
               "appid"
             ],
-            "title": "FriendsWhoOwnInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -533,29 +516,12 @@
         "required": [
           "params"
         ],
-        "title": "steam_find_friends_who_ownArguments",
         "type": "object"
       },
-      "name": "steam_find_friends_who_own",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_find_friends_who_ownOutput",
-        "type": "object"
-      }
+      "name": "steam_find_friends_who_own"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam App Details"
       },
@@ -568,7 +534,6 @@
               "appid": {
                 "description": "Steam application (game) ID.",
                 "minimum": 1,
-                "title": "Appid",
                 "type": "integer"
               },
               "country_code": {
@@ -576,19 +541,16 @@
                 "description": "ISO country code for pricing/availability (e.g. 'us', 'gb').",
                 "maxLength": 2,
                 "minLength": 2,
-                "title": "Country Code",
                 "type": "string"
               },
               "include_long_description": {
                 "default": false,
                 "description": "Include the full 'about the game' text (large). Off by default; the short description is always included.",
-                "title": "Include Long Description",
                 "type": "boolean"
               },
               "include_requirements": {
                 "default": true,
                 "description": "Include a short PC system-requirements summary (minimum + recommended).",
-                "title": "Include Requirements",
                 "type": "boolean"
               },
               "language": {
@@ -596,28 +558,21 @@
                 "description": "Steam language name for localized text (name, description, requirements), e.g. 'english', 'french', 'schinese'. Not ISO codes.",
                 "maxLength": 32,
                 "minLength": 2,
-                "title": "Language",
                 "type": "string"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               }
             },
             "required": [
               "appid"
             ],
-            "title": "AppDetailsInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -628,29 +583,12 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_app_detailsArguments",
         "type": "object"
       },
-      "name": "steam_get_app_details",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_app_detailsOutput",
-        "type": "object"
-      }
+      "name": "steam_get_app_details"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam App News/Updates"
       },
@@ -663,7 +601,6 @@
               "appid": {
                 "description": "Steam application (game) ID.",
                 "minimum": 1,
-                "title": "Appid",
                 "type": "integer"
               },
               "count": {
@@ -671,28 +608,21 @@
                 "description": "Number of news items (1-20).",
                 "maximum": 20,
                 "minimum": 1,
-                "title": "Count",
                 "type": "integer"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               }
             },
             "required": [
               "appid"
             ],
-            "title": "AppNewsInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -703,29 +633,12 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_app_newsArguments",
         "type": "object"
       },
-      "name": "steam_get_app_news",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_app_newsOutput",
-        "type": "object"
-      }
+      "name": "steam_get_app_news"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam Regional Pricing"
       },
@@ -738,7 +651,6 @@
               "appid": {
                 "description": "Steam application (game) ID.",
                 "minimum": 1,
-                "title": "Appid",
                 "type": "integer"
               },
               "countries": {
@@ -747,28 +659,21 @@
                   "type": "string"
                 },
                 "maxItems": 20,
-                "title": "Countries",
                 "type": "array"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               }
             },
             "required": [
               "appid"
             ],
-            "title": "RegionalPricingInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -779,29 +684,12 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_app_regional_pricingArguments",
         "type": "object"
       },
-      "name": "steam_get_app_regional_pricing",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_app_regional_pricingOutput",
-        "type": "object"
-      }
+      "name": "steam_get_app_regional_pricing"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam App Reviews & Rating"
       },
@@ -814,14 +702,12 @@
               "appid": {
                 "description": "Steam application (game) ID.",
                 "minimum": 1,
-                "title": "Appid",
                 "type": "integer"
               },
               "country_code": {
                 "default": "us",
                 "maxLength": 2,
                 "minLength": 2,
-                "title": "Country Code",
                 "type": "string"
               },
               "day_range": {
@@ -829,7 +715,6 @@
                 "description": "Window in days for review_filter='recent' (1-365). Ignored when review_filter='all'. Default 30 to match Steam's store page.",
                 "maximum": 365,
                 "minimum": 1,
-                "title": "Day Range",
                 "type": "integer"
               },
               "language": {
@@ -837,7 +722,6 @@
                 "description": "Review language to include and score: a Steam language name (e.g. 'english', 'french') or 'all' for every language. Default 'english'.",
                 "maxLength": 32,
                 "minLength": 2,
-                "title": "Language",
                 "type": "string"
               },
               "limit": {
@@ -845,40 +729,43 @@
                 "description": "Number of individual review excerpts to include (0-20). The score summary is always returned.",
                 "maximum": 20,
                 "minimum": 0,
-                "title": "Limit",
+                "type": "integer"
+              },
+              "purchase_type": {
+                "default": "store",
+                "description": "Whose reviews count: 'store' (default) matches the store page (Steam purchases only for a paid game, excluding key activations; everyone for a free game); 'steam' or 'all' to force either.",
+                "type": "string"
+              },
+              "recent_max_reviews": {
+                "default": 600,
+                "description": "Most reviews to tally for review_filter='recent' (100-10000). Raise it for busy games so the recent score isn't 'sampled'.",
+                "maximum": 10000,
+                "minimum": 100,
                 "type": "integer"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               },
               "review_filter": {
                 "default": "all",
                 "description": "Scoring window: 'all' returns Steam's lifetime summary; 'recent' additionally computes the last-N-days score (the store page's 'Recent Reviews' box) by tallying the newest reviews. Default 'all'.",
-                "title": "Review Filter",
                 "type": "string"
               },
               "review_type": {
                 "default": "all",
                 "description": "Which reviews to sample for excerpts: 'all', 'positive', or 'negative'.",
-                "title": "Review Type",
                 "type": "string"
               }
             },
             "required": [
               "appid"
             ],
-            "title": "AppReviewsInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -889,29 +776,12 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_app_reviewsArguments",
         "type": "object"
       },
-      "name": "steam_get_app_reviews",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_app_reviewsOutput",
-        "type": "object"
-      }
+      "name": "steam_get_app_reviews"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam Community Tags"
       },
@@ -924,14 +794,12 @@
               "appid": {
                 "description": "Steam application (game) ID.",
                 "minimum": 1,
-                "title": "Appid",
                 "type": "integer"
               },
               "country_code": {
                 "default": "us",
                 "maxLength": 2,
                 "minLength": 2,
-                "title": "Country Code",
                 "type": "string"
               },
               "limit": {
@@ -939,28 +807,21 @@
                 "description": "Max tags to return, ordered by community weight (1-50).",
                 "maximum": 50,
                 "minimum": 1,
-                "title": "Limit",
                 "type": "integer"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               }
             },
             "required": [
               "appid"
             ],
-            "title": "AppTagsInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -971,29 +832,12 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_app_tagsArguments",
         "type": "object"
       },
-      "name": "steam_get_app_tags",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_app_tagsOutput",
-        "type": "object"
-      }
+      "name": "steam_get_app_tags"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam Live Player Count"
       },
@@ -1006,28 +850,21 @@
               "appid": {
                 "description": "Steam application (game) ID.",
                 "minimum": 1,
-                "title": "Appid",
                 "type": "integer"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               }
             },
             "required": [
               "appid"
             ],
-            "title": "AppOnlyInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -1038,29 +875,12 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_current_playersArguments",
         "type": "object"
       },
-      "name": "steam_get_current_players",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_current_playersOutput",
-        "type": "object"
-      }
+      "name": "steam_get_current_players"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Steam Deck Compatibility"
       },
@@ -1073,35 +893,27 @@
               "appid": {
                 "description": "Steam application (game) ID.",
                 "minimum": 1,
-                "title": "Appid",
                 "type": "integer"
               },
               "language": {
                 "default": "english",
                 "description": "Steam language name for the report (the category label is normalized to English regardless).",
                 "maxLength": 32,
-                "title": "Language",
                 "type": "string"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               }
             },
             "required": [
               "appid"
             ],
-            "title": "DeckCompatInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -1112,29 +924,12 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_deck_compatibilityArguments",
         "type": "object"
       },
-      "name": "steam_get_deck_compatibility",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_deck_compatibilityOutput",
-        "type": "object"
-      }
+      "name": "steam_get_deck_compatibility"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam Game DLC"
       },
@@ -1147,20 +942,17 @@
               "appid": {
                 "description": "Steam application (game) ID of the BASE game whose DLC to list.",
                 "minimum": 1,
-                "title": "Appid",
                 "type": "integer"
               },
               "country_code": {
                 "default": "us",
                 "maxLength": 2,
                 "minLength": 2,
-                "title": "Country Code",
                 "type": "string"
               },
               "enrich": {
                 "default": true,
                 "description": "Fetch each DLC's name + current price/discount (one store lookup per DLC, run concurrently). Set false for a fast appid-only list.",
-                "title": "Enrich",
                 "type": "boolean"
               },
               "limit": {
@@ -1168,34 +960,26 @@
                 "description": "Max DLC entries to return (1-100). Big franchises list hundreds of DLC, so keep this modest when enriching.",
                 "maximum": 100,
                 "minimum": 1,
-                "title": "Limit",
                 "type": "integer"
               },
               "on_sale_only": {
                 "default": false,
                 "description": "If true (requires enrich=true), return only DLC currently discounted.",
-                "title": "On Sale Only",
                 "type": "boolean"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               }
             },
             "required": [
               "appid"
             ],
-            "title": "DlcInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -1206,29 +990,12 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_dlcArguments",
         "type": "object"
       },
-      "name": "steam_get_dlc",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_dlcOutput",
-        "type": "object"
-      }
+      "name": "steam_get_dlc"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam Featured Sales/Specials"
       },
@@ -1243,7 +1010,6 @@
                 "description": "ISO country code for regional pricing (e.g. 'us', 'gb', 'de').",
                 "maxLength": 2,
                 "minLength": 2,
-                "title": "Country Code",
                 "type": "string"
               },
               "limit": {
@@ -1251,25 +1017,18 @@
                 "description": "Max games on sale to return (1-50).",
                 "maximum": 50,
                 "minimum": 1,
-                "title": "Limit",
                 "type": "integer"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               }
             },
-            "title": "FeaturedInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -1280,33 +1039,16 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_featured_specialsArguments",
         "type": "object"
       },
-      "name": "steam_get_featured_specials",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_featured_specialsOutput",
-        "type": "object"
-      }
+      "name": "steam_get_featured_specials"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam Friend List"
       },
-      "description": "List a user's Steam friends, enriched with name and current status. [unavailable: needs STEAM_API_KEY]",
+      "description": "List a user's Steam friends, enriched with name and current status.",
       "inputSchema": {
         "$defs": {
           "FriendListInput": {
@@ -1317,26 +1059,27 @@
                 "description": "Maximum friends to return (1-200). Each is enriched with name and current status.",
                 "maximum": 200,
                 "minimum": 1,
-                "title": "Limit",
                 "type": "integer"
               },
               "offset": {
                 "default": 0,
                 "description": "Friends to skip for pagination.",
                 "minimum": 0,
-                "title": "Offset",
                 "type": "integer"
               },
               "online_only": {
                 "default": false,
                 "description": "If true, return only friends who are not Offline.",
-                "title": "Online Only",
                 "type": "boolean"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
                 "default": "markdown",
-                "description": "'markdown' for human-readable, 'json' for machine-readable."
+                "description": "'markdown' for human-readable, 'json' for machine-readable.",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               },
               "steamid": {
                 "anyOf": [
@@ -1348,22 +1091,10 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "SteamID64 (17 digits), vanity name, or full profile URL (e.g. '76561197960287930', 'gabelogannewell'). Omit to use the configured STEAM_USER (your own Steam name), if set.",
-                "title": "Steamid"
+                "description": "SteamID64 (17 digits), vanity name, or full profile URL (e.g. '76561197960287930', 'gabelogannewell'). Omit to use the configured STEAM_USER (your own Steam name), if set."
               }
             },
-            "title": "FriendListInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -1374,167 +1105,116 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_friend_listArguments",
         "type": "object"
       },
-      "name": "steam_get_friend_list",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_friend_listOutput",
-        "type": "object"
-      }
+      "name": "steam_get_friend_list"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam Game Schema"
       },
-      "description": "Get the achievement and stat definitions for a game (not user-specific). [unavailable: needs STEAM_API_KEY]",
+      "description": "Get the achievement and stat definitions for a game (not user-specific).",
       "inputSchema": {
         "$defs": {
-          "AppOnlyInput": {
+          "GameSchemaInput": {
             "additionalProperties": false,
             "properties": {
               "appid": {
                 "description": "Steam application (game) ID.",
                 "minimum": 1,
-                "title": "Appid",
+                "type": "integer"
+              },
+              "limit": {
+                "default": 100,
+                "description": "Max achievement definitions to list (1-250); the count always covers all of them.",
+                "maximum": 250,
+                "minimum": 1,
                 "type": "integer"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               }
             },
             "required": [
               "appid"
             ],
-            "title": "AppOnlyInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
           "params": {
-            "$ref": "#/$defs/AppOnlyInput"
+            "$ref": "#/$defs/GameSchemaInput"
           }
         },
         "required": [
           "params"
         ],
-        "title": "steam_get_game_schemaArguments",
         "type": "object"
       },
-      "name": "steam_get_game_schema",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_game_schemaOutput",
-        "type": "object"
-      }
+      "name": "steam_get_game_schema"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Global Achievement Rarity"
       },
       "description": "Get the global unlock percentage (rarity) of each achievement in a game.",
       "inputSchema": {
         "$defs": {
-          "AppOnlyInput": {
+          "GlobalAchievementsInput": {
             "additionalProperties": false,
             "properties": {
               "appid": {
                 "description": "Steam application (game) ID.",
                 "minimum": 1,
-                "title": "Appid",
+                "type": "integer"
+              },
+              "limit": {
+                "default": 50,
+                "description": "Max achievements to list, rarest first (1-500); the count always covers all of them.",
+                "maximum": 500,
+                "minimum": 1,
                 "type": "integer"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               }
             },
             "required": [
               "appid"
             ],
-            "title": "AppOnlyInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
           "params": {
-            "$ref": "#/$defs/AppOnlyInput"
+            "$ref": "#/$defs/GlobalAchievementsInput"
           }
         },
         "required": [
           "params"
         ],
-        "title": "steam_get_global_achievement_percentagesArguments",
         "type": "object"
       },
-      "name": "steam_get_global_achievement_percentages",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_global_achievement_percentagesOutput",
-        "type": "object"
-      }
+      "name": "steam_get_global_achievement_percentages"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam Inventory"
       },
-      "description": "List a user's Steam inventory — game items or generic Community items. [unavailable: needs STEAM_API_KEY]",
+      "description": "List a user's Steam inventory — game items or generic Community items.",
       "inputSchema": {
         "$defs": {
           "InventoryInput": {
@@ -1544,7 +1224,6 @@
                 "default": 753,
                 "description": "App whose inventory to read. 753 = Steam Community items (trading cards, emoticons, backgrounds, gems); 730 = CS2; 440 = TF2; 570 = Dota 2; etc.",
                 "minimum": 1,
-                "title": "Appid",
                 "type": "integer"
               },
               "context_id": {
@@ -1557,16 +1236,13 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "Inventory context within the app. Leave unset to auto-pick (6 for app 753 / Community items, 2 for games).",
-                "title": "Context Id"
+                "description": "Inventory context within the app. Leave unset to auto-pick (6 for app 753 / Community items, 2 for games)."
               },
               "count": {
                 "default": 100,
                 "description": "Max item instances to fetch (a sample for very large inventories).",
                 "maximum": 2000,
                 "minimum": 1,
-                "title": "Count",
                 "type": "integer"
               },
               "language": {
@@ -1574,12 +1250,22 @@
                 "description": "Steam language name for localized item names.",
                 "maxLength": 32,
                 "minLength": 2,
-                "title": "Language",
                 "type": "string"
               },
+              "limit": {
+                "default": 50,
+                "description": "Max distinct items to list, most-numerous first (1-200); distinct_items always counts all of them.",
+                "maximum": 200,
+                "minimum": 1,
+                "type": "integer"
+              },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               },
               "steamid": {
                 "anyOf": [
@@ -1591,22 +1277,10 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "SteamID64, vanity name, or profile URL of the inventory owner. Omit to use the configured STEAM_USER, if set.",
-                "title": "Steamid"
+                "description": "SteamID64, vanity name, or profile URL of the inventory owner. Omit to use the configured STEAM_USER, if set."
               }
             },
-            "title": "InventoryInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -1617,29 +1291,12 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_inventoryArguments",
         "type": "object"
       },
-      "name": "steam_get_inventory",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_inventoryOutput",
-        "type": "object"
-      }
+      "name": "steam_get_inventory"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam Community Market Price"
       },
@@ -1652,7 +1309,6 @@
               "appid": {
                 "description": "App the item belongs to: 730 = CS2, 440 = TF2, 570 = Dota 2, 753 = Steam Community items.",
                 "minimum": 1,
-                "title": "Appid",
                 "type": "integer"
               },
               "currency": {
@@ -1660,42 +1316,33 @@
                 "description": "Steam currency code: 1=USD, 2=GBP, 3=EUR, 5=RUB, 9=JPY, 20=BRL, 23=CNY, etc.",
                 "maximum": 41,
                 "minimum": 1,
-                "title": "Currency",
                 "type": "integer"
               },
               "include_item_details": {
                 "default": true,
                 "description": "Also look up the item's type/rarity and listing count (one extra request). Set false for price only.",
-                "title": "Include Item Details",
                 "type": "boolean"
               },
               "market_hash_name": {
                 "description": "The item's exact Market Hash Name — it encodes the variant, so include condition/quality prefixes, e.g. 'AK-47 | Redline (Field-Tested)', 'StatTrak™ AWP | Asiimov (Field-Tested)', 'Souvenir ...'. Copy it from the item's Community Market page.",
                 "maxLength": 300,
                 "minLength": 1,
-                "title": "Market Hash Name",
                 "type": "string"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               }
             },
             "required": [
               "appid",
               "market_hash_name"
             ],
-            "title": "MarketPriceInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -1706,33 +1353,16 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_market_priceArguments",
         "type": "object"
       },
-      "name": "steam_get_market_price",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_market_priceOutput",
-        "type": "object"
-      }
+      "name": "steam_get_market_price"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam Owned Games"
       },
-      "description": "List the games a user owns, with total and recent hours played. [unavailable: needs STEAM_API_KEY]",
+      "description": "List the games a user owns, with total and recent hours played.",
       "inputSchema": {
         "$defs": {
           "OwnedGamesInput": {
@@ -1741,7 +1371,6 @@
               "include_free_games": {
                 "default": true,
                 "description": "Include free-to-play games the user has played.",
-                "title": "Include Free Games",
                 "type": "boolean"
               },
               "limit": {
@@ -1749,25 +1378,26 @@
                 "description": "Maximum games to return after sorting (1-200).",
                 "maximum": 200,
                 "minimum": 1,
-                "title": "Limit",
                 "type": "integer"
               },
               "offset": {
                 "default": 0,
                 "description": "Games to skip for pagination.",
                 "minimum": 0,
-                "title": "Offset",
                 "type": "integer"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
                 "default": "markdown",
-                "description": "'markdown' for human-readable, 'json' for machine-readable."
+                "description": "'markdown' for human-readable, 'json' for machine-readable.",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               },
               "sort_by": {
                 "default": "playtime",
                 "description": "Sort order: 'playtime' (most played first) or 'name' (A-Z).",
-                "title": "Sort By",
                 "type": "string"
               },
               "steamid": {
@@ -1780,22 +1410,10 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "SteamID64 (17 digits), vanity name, or full profile URL (e.g. '76561197960287930', 'gabelogannewell'). Omit to use the configured STEAM_USER (your own Steam name), if set.",
-                "title": "Steamid"
+                "description": "SteamID64 (17 digits), vanity name, or full profile URL (e.g. '76561197960287930', 'gabelogannewell'). Omit to use the configured STEAM_USER (your own Steam name), if set."
               }
             },
-            "title": "OwnedGamesInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -1806,29 +1424,12 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_owned_gamesArguments",
         "type": "object"
       },
-      "name": "steam_get_owned_games",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_owned_gamesOutput",
-        "type": "object"
-      }
+      "name": "steam_get_owned_games"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam Package/Bundle Details"
       },
@@ -1843,34 +1444,26 @@
                 "description": "ISO country code for regional pricing (e.g. 'us', 'gb').",
                 "maxLength": 2,
                 "minLength": 2,
-                "title": "Country Code",
                 "type": "string"
               },
               "packageid": {
                 "description": "Steam package (sub) ID. Package IDs appear in a game's store details under 'packages' (distinct from app IDs).",
                 "minimum": 1,
-                "title": "Packageid",
                 "type": "integer"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               }
             },
             "required": [
               "packageid"
             ],
-            "title": "PackageDetailsInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -1881,42 +1474,24 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_package_detailsArguments",
         "type": "object"
       },
-      "name": "steam_get_package_details",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_package_detailsOutput",
-        "type": "object"
-      }
+      "name": "steam_get_package_details"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam Player Achievements"
       },
-      "description": "Get a user's achievement progress for a specific game. [unavailable: needs STEAM_API_KEY]",
+      "description": "Get a user's achievement progress for a specific game.",
       "inputSchema": {
         "$defs": {
-          "PlayerGameInput": {
+          "PlayerAchievementsInput": {
             "additionalProperties": false,
             "properties": {
               "appid": {
                 "description": "Steam application (game) ID, e.g. 730 for CS2, 570 for Dota 2.",
                 "minimum": 1,
-                "title": "Appid",
                 "type": "integer"
               },
               "language": {
@@ -1924,13 +1499,23 @@
                 "description": "Steam language name for localized text (achievement names, etc.), e.g. 'english', 'french', 'german', 'schinese'. Not ISO codes.",
                 "maxLength": 32,
                 "minLength": 2,
-                "title": "Language",
                 "type": "string"
               },
+              "limit": {
+                "default": 50,
+                "description": "Max locked achievements to list (1-300); the counts always cover all of them.",
+                "maximum": 300,
+                "minimum": 1,
+                "type": "integer"
+              },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
                 "default": "markdown",
-                "description": "'markdown' for human-readable, 'json' for machine-readable."
+                "description": "'markdown' for human-readable, 'json' for machine-readable.",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               },
               "steamid": {
                 "anyOf": [
@@ -1942,71 +1527,46 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "SteamID64 (17 digits), vanity name, or full profile URL (e.g. '76561197960287930', 'gabelogannewell'). Omit to use the configured STEAM_USER (your own Steam name), if set.",
-                "title": "Steamid"
+                "description": "SteamID64 (17 digits), vanity name, or full profile URL (e.g. '76561197960287930', 'gabelogannewell'). Omit to use the configured STEAM_USER (your own Steam name), if set."
               }
             },
             "required": [
               "appid"
             ],
-            "title": "PlayerGameInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
           "params": {
-            "$ref": "#/$defs/PlayerGameInput"
+            "$ref": "#/$defs/PlayerAchievementsInput"
           }
         },
         "required": [
           "params"
         ],
-        "title": "steam_get_player_achievementsArguments",
         "type": "object"
       },
-      "name": "steam_get_player_achievements",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_player_achievementsOutput",
-        "type": "object"
-      }
+      "name": "steam_get_player_achievements"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam Player Badges"
       },
-      "description": "Get a user's badges and the XP breakdown behind their Steam level. [unavailable: needs STEAM_API_KEY]",
+      "description": "Get a user's badges and the XP breakdown behind their Steam level.",
       "inputSchema": {
         "$defs": {
           "PlayerInput": {
             "additionalProperties": false,
             "properties": {
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
                 "default": "markdown",
-                "description": "'markdown' for human-readable, 'json' for machine-readable."
+                "description": "'markdown' for human-readable, 'json' for machine-readable.",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               },
               "steamid": {
                 "anyOf": [
@@ -2018,22 +1578,10 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "SteamID64 (17 digits), vanity name, or full profile URL (e.g. '76561197960287930', 'gabelogannewell'). Omit to use the configured STEAM_USER (your own Steam name), if set.",
-                "title": "Steamid"
+                "description": "SteamID64 (17 digits), vanity name, or full profile URL (e.g. '76561197960287930', 'gabelogannewell'). Omit to use the configured STEAM_USER (your own Steam name), if set."
               }
             },
-            "title": "PlayerInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -2044,42 +1592,29 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_player_badgesArguments",
         "type": "object"
       },
-      "name": "steam_get_player_badges",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_player_badgesOutput",
-        "type": "object"
-      }
+      "name": "steam_get_player_badges"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam Player Bans"
       },
-      "description": "Get VAC / game / community / economy ban status for a user. [unavailable: needs STEAM_API_KEY]",
+      "description": "Get VAC / game / community / economy ban status for a user.",
       "inputSchema": {
         "$defs": {
           "PlayerInput": {
             "additionalProperties": false,
             "properties": {
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
                 "default": "markdown",
-                "description": "'markdown' for human-readable, 'json' for machine-readable."
+                "description": "'markdown' for human-readable, 'json' for machine-readable.",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               },
               "steamid": {
                 "anyOf": [
@@ -2091,22 +1626,10 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "SteamID64 (17 digits), vanity name, or full profile URL (e.g. '76561197960287930', 'gabelogannewell'). Omit to use the configured STEAM_USER (your own Steam name), if set.",
-                "title": "Steamid"
+                "description": "SteamID64 (17 digits), vanity name, or full profile URL (e.g. '76561197960287930', 'gabelogannewell'). Omit to use the configured STEAM_USER (your own Steam name), if set."
               }
             },
-            "title": "PlayerInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -2117,41 +1640,28 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_player_bansArguments",
         "type": "object"
       },
-      "name": "steam_get_player_bans",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_player_bansOutput",
-        "type": "object"
-      }
+      "name": "steam_get_player_bans"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam Player Summary"
       },
-      "description": "Get profile + current status for one or more Steam users. [unavailable: needs STEAM_API_KEY]",
+      "description": "Get profile + current status for one or more Steam users.",
       "inputSchema": {
         "$defs": {
           "PlayersInput": {
             "additionalProperties": false,
             "properties": {
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               },
               "steamids": {
                 "description": "List of SteamID64 / vanity names / profile URLs (max 100). Omit/empty to use the configured STEAM_USER, if set.",
@@ -2159,21 +1669,10 @@
                   "type": "string"
                 },
                 "maxItems": 100,
-                "title": "Steamids",
                 "type": "array"
               }
             },
-            "title": "PlayersInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -2184,33 +1683,16 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_player_summaryArguments",
         "type": "object"
       },
-      "name": "steam_get_player_summary",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_player_summaryOutput",
-        "type": "object"
-      }
+      "name": "steam_get_player_summary"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Player's Rarest Achievement Unlocks"
       },
-      "description": "Show a player's RAREST unlocked achievements in a game (by global unlock %). [unavailable: needs STEAM_API_KEY]",
+      "description": "Show a player's RAREST unlocked achievements in a game (by global unlock %).",
       "inputSchema": {
         "$defs": {
           "RarestUnlocksInput": {
@@ -2219,7 +1701,6 @@
               "appid": {
                 "description": "Steam application (game) ID, e.g. 730 for CS2, 570 for Dota 2.",
                 "minimum": 1,
-                "title": "Appid",
                 "type": "integer"
               },
               "language": {
@@ -2227,7 +1708,6 @@
                 "description": "Steam language name for localized text (achievement names, etc.), e.g. 'english', 'french', 'german', 'schinese'. Not ISO codes.",
                 "maxLength": 32,
                 "minLength": 2,
-                "title": "Language",
                 "type": "string"
               },
               "limit": {
@@ -2235,13 +1715,16 @@
                 "description": "How many of the rarest unlocked achievements to list (1-50).",
                 "maximum": 50,
                 "minimum": 1,
-                "title": "Limit",
                 "type": "integer"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
                 "default": "markdown",
-                "description": "'markdown' for human-readable, 'json' for machine-readable."
+                "description": "'markdown' for human-readable, 'json' for machine-readable.",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               },
               "steamid": {
                 "anyOf": [
@@ -2253,25 +1736,13 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "SteamID64 (17 digits), vanity name, or full profile URL (e.g. '76561197960287930', 'gabelogannewell'). Omit to use the configured STEAM_USER (your own Steam name), if set.",
-                "title": "Steamid"
+                "description": "SteamID64 (17 digits), vanity name, or full profile URL (e.g. '76561197960287930', 'gabelogannewell'). Omit to use the configured STEAM_USER (your own Steam name), if set."
               }
             },
             "required": [
               "appid"
             ],
-            "title": "RarestUnlocksInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -2282,42 +1753,29 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_rarest_unlocksArguments",
         "type": "object"
       },
-      "name": "steam_get_rarest_unlocks",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_rarest_unlocksOutput",
-        "type": "object"
-      }
+      "name": "steam_get_rarest_unlocks"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam Recently Played Games"
       },
-      "description": "List games a user has played in the last two weeks, with hours. [unavailable: needs STEAM_API_KEY]",
+      "description": "List games a user has played in the last two weeks, with hours.",
       "inputSchema": {
         "$defs": {
           "PlayerInput": {
             "additionalProperties": false,
             "properties": {
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
                 "default": "markdown",
-                "description": "'markdown' for human-readable, 'json' for machine-readable."
+                "description": "'markdown' for human-readable, 'json' for machine-readable.",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               },
               "steamid": {
                 "anyOf": [
@@ -2329,22 +1787,10 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "SteamID64 (17 digits), vanity name, or full profile URL (e.g. '76561197960287930', 'gabelogannewell'). Omit to use the configured STEAM_USER (your own Steam name), if set.",
-                "title": "Steamid"
+                "description": "SteamID64 (17 digits), vanity name, or full profile URL (e.g. '76561197960287930', 'gabelogannewell'). Omit to use the configured STEAM_USER (your own Steam name), if set."
               }
             },
-            "title": "PlayerInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -2355,42 +1801,29 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_recently_played_gamesArguments",
         "type": "object"
       },
-      "name": "steam_get_recently_played_games",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_recently_played_gamesOutput",
-        "type": "object"
-      }
+      "name": "steam_get_recently_played_games"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam Level"
       },
-      "description": "Get a user's Steam community level (the XP-based account level). [unavailable: needs STEAM_API_KEY]",
+      "description": "Get a user's Steam community level (the XP-based account level).",
       "inputSchema": {
         "$defs": {
           "PlayerInput": {
             "additionalProperties": false,
             "properties": {
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
                 "default": "markdown",
-                "description": "'markdown' for human-readable, 'json' for machine-readable."
+                "description": "'markdown' for human-readable, 'json' for machine-readable.",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               },
               "steamid": {
                 "anyOf": [
@@ -2402,22 +1835,10 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "SteamID64 (17 digits), vanity name, or full profile URL (e.g. '76561197960287930', 'gabelogannewell'). Omit to use the configured STEAM_USER (your own Steam name), if set.",
-                "title": "Steamid"
+                "description": "SteamID64 (17 digits), vanity name, or full profile URL (e.g. '76561197960287930', 'gabelogannewell'). Omit to use the configured STEAM_USER (your own Steam name), if set."
               }
             },
-            "title": "PlayerInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -2428,44 +1849,18 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_steam_levelArguments",
         "type": "object"
       },
-      "name": "steam_get_steam_level",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_steam_levelOutput",
-        "type": "object"
-      }
+      "name": "steam_get_steam_level"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam Store Highlights"
       },
       "description": "List a Steam storefront section: top sellers, new releases, or coming soon.",
       "inputSchema": {
         "$defs": {
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
-          },
           "StoreHighlightsInput": {
             "additionalProperties": false,
             "properties": {
@@ -2474,7 +1869,6 @@
                 "description": "ISO country code for regional pricing (e.g. 'us', 'gb').",
                 "maxLength": 2,
                 "minLength": 2,
-                "title": "Country Code",
                 "type": "string"
               },
               "limit": {
@@ -2482,21 +1876,22 @@
                 "description": "Max items to return (1-50).",
                 "maximum": 50,
                 "minimum": 1,
-                "title": "Limit",
                 "type": "integer"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               },
               "section": {
                 "default": "top_sellers",
                 "description": "Which storefront list to return: 'top_sellers', 'new_releases', 'coming_soon', or 'specials'.",
-                "title": "Section",
                 "type": "string"
               }
             },
-            "title": "StoreHighlightsInput",
             "type": "object"
           }
         },
@@ -2508,42 +1903,24 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_store_highlightsArguments",
         "type": "object"
       },
-      "name": "steam_get_store_highlights",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_store_highlightsOutput",
-        "type": "object"
-      }
+      "name": "steam_get_store_highlights"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam User Game Stats"
       },
-      "description": "Get a user's in-game STATS for a specific game (kills, wins, distance, etc.). [unavailable: needs STEAM_API_KEY]",
+      "description": "Get a user's in-game STATS for a specific game (kills, wins, distance, etc.).",
       "inputSchema": {
         "$defs": {
-          "PlayerGameInput": {
+          "UserGameStatsInput": {
             "additionalProperties": false,
             "properties": {
               "appid": {
                 "description": "Steam application (game) ID, e.g. 730 for CS2, 570 for Dota 2.",
                 "minimum": 1,
-                "title": "Appid",
                 "type": "integer"
               },
               "language": {
@@ -2551,13 +1928,23 @@
                 "description": "Steam language name for localized text (achievement names, etc.), e.g. 'english', 'french', 'german', 'schinese'. Not ISO codes.",
                 "maxLength": 32,
                 "minLength": 2,
-                "title": "Language",
                 "type": "string"
               },
+              "limit": {
+                "default": 100,
+                "description": "Max stats to list (1-500); stat_count always covers all of them.",
+                "maximum": 500,
+                "minimum": 1,
+                "type": "integer"
+              },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
                 "default": "markdown",
-                "description": "'markdown' for human-readable, 'json' for machine-readable."
+                "description": "'markdown' for human-readable, 'json' for machine-readable.",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               },
               "steamid": {
                 "anyOf": [
@@ -2569,80 +1956,41 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "SteamID64 (17 digits), vanity name, or full profile URL (e.g. '76561197960287930', 'gabelogannewell'). Omit to use the configured STEAM_USER (your own Steam name), if set.",
-                "title": "Steamid"
+                "description": "SteamID64 (17 digits), vanity name, or full profile URL (e.g. '76561197960287930', 'gabelogannewell'). Omit to use the configured STEAM_USER (your own Steam name), if set."
               }
             },
             "required": [
               "appid"
             ],
-            "title": "PlayerGameInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
           "params": {
-            "$ref": "#/$defs/PlayerGameInput"
+            "$ref": "#/$defs/UserGameStatsInput"
           }
         },
         "required": [
           "params"
         ],
-        "title": "steam_get_user_game_statsArguments",
         "type": "object"
       },
-      "name": "steam_get_user_game_stats",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_user_game_statsOutput",
-        "type": "object"
-      }
+      "name": "steam_get_user_game_stats"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam User Groups"
       },
-      "description": "List the Steam groups (communities/clans) a user belongs to. [unavailable: needs STEAM_API_KEY]",
+      "description": "List the Steam groups (communities/clans) a user belongs to.",
       "inputSchema": {
         "$defs": {
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
-          },
           "UserGroupsInput": {
             "additionalProperties": false,
             "properties": {
               "enrich": {
                 "default": true,
                 "description": "Fetch each group's name, URL, and member count. Set false for a fast group-ID-only list.",
-                "title": "Enrich",
                 "type": "boolean"
               },
               "limit": {
@@ -2650,13 +1998,16 @@
                 "description": "Max groups to return; each enriched group is one extra lookup.",
                 "maximum": 100,
                 "minimum": 1,
-                "title": "Limit",
                 "type": "integer"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
                 "default": "markdown",
-                "description": "'markdown' for human-readable, 'json' for machine-readable."
+                "description": "'markdown' for human-readable, 'json' for machine-readable.",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               },
               "steamid": {
                 "anyOf": [
@@ -2668,12 +2019,9 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "SteamID64 (17 digits), vanity name, or full profile URL (e.g. '76561197960287930', 'gabelogannewell'). Omit to use the configured STEAM_USER (your own Steam name), if set.",
-                "title": "Steamid"
+                "description": "SteamID64 (17 digits), vanity name, or full profile URL (e.g. '76561197960287930', 'gabelogannewell'). Omit to use the configured STEAM_USER (your own Steam name), if set."
               }
             },
-            "title": "UserGroupsInput",
             "type": "object"
           }
         },
@@ -2685,44 +2033,18 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_user_groupsArguments",
         "type": "object"
       },
-      "name": "steam_get_user_groups",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_user_groupsOutput",
-        "type": "object"
-      }
+      "name": "steam_get_user_groups"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam Wishlist"
       },
-      "description": "Get a user's Steam wishlist, optionally with live prices and sale status. [unavailable: needs STEAM_API_KEY]",
+      "description": "Get a user's Steam wishlist, optionally with live prices and sale status.",
       "inputSchema": {
         "$defs": {
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
-          },
           "WishlistInput": {
             "additionalProperties": false,
             "properties": {
@@ -2730,13 +2052,11 @@
                 "default": "us",
                 "maxLength": 2,
                 "minLength": 2,
-                "title": "Country Code",
                 "type": "string"
               },
               "enrich": {
                 "default": true,
                 "description": "Fetch each game's name + current price/discount (one store lookup per game). Set false for a fast appid-only list.",
-                "title": "Enrich",
                 "type": "boolean"
               },
               "limit": {
@@ -2744,18 +2064,20 @@
                 "description": "Max wishlist entries to return, ordered by wishlist priority (1-50). Enriched entries each cost one store lookup, so keep this modest.",
                 "maximum": 50,
                 "minimum": 1,
-                "title": "Limit",
                 "type": "integer"
               },
               "on_sale_only": {
                 "default": false,
                 "description": "If true (requires enrich=true), return only wishlist games that are currently discounted.",
-                "title": "On Sale Only",
                 "type": "boolean"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               },
               "steamid": {
                 "anyOf": [
@@ -2767,12 +2089,9 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "SteamID64, vanity name, or profile URL of the wishlist owner. Omit to use the configured STEAM_USER, if set.",
-                "title": "Steamid"
+                "description": "SteamID64, vanity name, or profile URL of the wishlist owner. Omit to use the configured STEAM_USER, if set."
               }
             },
-            "title": "WishlistInput",
             "type": "object"
           }
         },
@@ -2784,62 +2103,38 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_wishlistArguments",
         "type": "object"
       },
-      "name": "steam_get_wishlist",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_wishlistOutput",
-        "type": "object"
-      }
+      "name": "steam_get_wishlist"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Get Steam Workshop Item"
       },
       "description": "Get metadata for a Steam Workshop item (mod, map, guide, collection, …).",
       "inputSchema": {
         "$defs": {
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
-          },
           "WorkshopItemInput": {
             "additionalProperties": false,
             "properties": {
               "published_file_id": {
                 "description": "Steam Workshop published file ID (the ?id= number in the item's community URL).",
                 "minimum": 1,
-                "title": "Published File Id",
                 "type": "integer"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               }
             },
             "required": [
               "published_file_id"
             ],
-            "title": "WorkshopItemInput",
             "type": "object"
           }
         },
@@ -2851,33 +2146,16 @@
         "required": [
           "params"
         ],
-        "title": "steam_get_workshop_itemArguments",
         "type": "object"
       },
-      "name": "steam_get_workshop_item",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_get_workshop_itemOutput",
-        "type": "object"
-      }
+      "name": "steam_get_workshop_item"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Plan a Steam Co-op Night"
       },
-      "description": "Find co-op games the host and their friends all own — for game night. [unavailable: needs STEAM_API_KEY]",
+      "description": "Find co-op games the host and their friends all own — for game night.",
       "inputSchema": {
         "$defs": {
           "PlanCoopNightInput": {
@@ -2887,7 +2165,6 @@
                 "default": "us",
                 "maxLength": 2,
                 "minLength": 2,
-                "title": "Country Code",
                 "type": "string"
               },
               "friends": {
@@ -2896,7 +2173,6 @@
                   "type": "string"
                 },
                 "maxItems": 50,
-                "title": "Friends",
                 "type": "array"
               },
               "limit": {
@@ -2904,7 +2180,6 @@
                 "description": "Max co-op games to list.",
                 "maximum": 50,
                 "minimum": 1,
-                "title": "Limit",
                 "type": "integer"
               },
               "max_friends": {
@@ -2912,7 +2187,6 @@
                 "description": "Max friends to check when deriving the group (bounds lookups).",
                 "maximum": 100,
                 "minimum": 1,
-                "title": "Max Friends",
                 "type": "integer"
               },
               "min_friends_owning": {
@@ -2920,24 +2194,25 @@
                 "description": "A game must be owned by the host AND at least this many group members to be suggested.",
                 "maximum": 50,
                 "minimum": 1,
-                "title": "Min Friends Owning",
                 "type": "integer"
               },
               "mode": {
                 "default": "owned",
                 "description": "'owned' (default): co-op games the host + friends already SHARE, ranked by how many own each. 'new': well-reviewed co-op games NONE of the group owns yet — fresh picks to buy and play together.",
-                "title": "Mode",
                 "type": "string"
               },
               "online_only": {
                 "default": true,
                 "description": "When the group is derived from the friend list, include only friends online right now. Ignored when 'friends' is given.",
-                "title": "Online Only",
                 "type": "boolean"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               },
               "steamid": {
                 "anyOf": [
@@ -2949,22 +2224,10 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "The host whose library to match against friends. SteamID64, vanity, or profile URL. Omit to use the configured STEAM_USER, if set.",
-                "title": "Steamid"
+                "description": "The host whose library to match against friends. SteamID64, vanity, or profile URL. Omit to use the configured STEAM_USER, if set."
               }
             },
-            "title": "PlanCoopNightInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -2975,33 +2238,16 @@
         "required": [
           "params"
         ],
-        "title": "steam_plan_coop_nightArguments",
         "type": "object"
       },
-      "name": "steam_plan_coop_night",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_plan_coop_nightOutput",
-        "type": "object"
-      }
+      "name": "steam_plan_coop_night"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Recommend Steam Games (with reasons)"
       },
-      "description": "Recommend games similar to a seed game (\"like Hades\") or to a user's taste, explaining the shared tags; for \"games like X\" / \"what should I play\" (for filtered search use steam_discover). [works without a key unless you pass steamid]",
+      "description": "Recommend games similar to a seed game (\"like Hades\") or to a user's taste, explaining the shared tags; for \"games like X\" / \"what should I play\" (for filtered search use steam_discover).",
       "inputSchema": {
         "$defs": {
           "RecommendInput": {
@@ -3011,7 +2257,6 @@
                 "default": "us",
                 "maxLength": 2,
                 "minLength": 2,
-                "title": "Country Code",
                 "type": "string"
               },
               "limit": {
@@ -3019,7 +2264,6 @@
                 "description": "Max recommendations (1-30).",
                 "maximum": 30,
                 "minimum": 1,
-                "title": "Limit",
                 "type": "integer"
               },
               "max_price": {
@@ -3033,13 +2277,15 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "Optional max price (country's currency units).",
-                "title": "Max Price"
+                "description": "Optional max price (country's currency units)."
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               },
               "seed_appid": {
                 "anyOf": [
@@ -3051,9 +2297,7 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "Recommend games similar to THIS game (by community tags).",
-                "title": "Seed Appid"
+                "description": "Recommend games similar to THIS game (by community tags)."
               },
               "steamid": {
                 "anyOf": [
@@ -3065,9 +2309,7 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "Excludes games this user already owns; seeds the tags from their taste (most-played + recent) only when no seed_appid/tags are given. SteamID64, vanity, or profile URL.",
-                "title": "Steamid"
+                "description": "Excludes games this user already owns; seeds the tags from their taste (most-played + recent) only when no seed_appid/tags are given. SteamID64, vanity, or profile URL."
               },
               "tags": {
                 "description": "Explicit tag names to base recommendations on. Takes precedence over seed_appid/steamid tags if given.",
@@ -3075,21 +2317,10 @@
                   "type": "string"
                 },
                 "maxItems": 10,
-                "title": "Tags",
                 "type": "array"
               }
             },
-            "title": "RecommendInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -3100,42 +2331,29 @@
         "required": [
           "params"
         ],
-        "title": "steam_recommendArguments",
         "type": "object"
       },
-      "name": "steam_recommend",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_recommendOutput",
-        "type": "object"
-      }
+      "name": "steam_recommend"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Resolve Steam Vanity URL"
       },
-      "description": "Resolve a Steam vanity/custom-URL name (or profile URL) to a SteamID64. [unavailable: needs STEAM_API_KEY]",
+      "description": "Resolve a Steam vanity/custom-URL name (or profile URL) to a SteamID64.",
       "inputSchema": {
         "$defs": {
           "PlayerInput": {
             "additionalProperties": false,
             "properties": {
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
                 "default": "markdown",
-                "description": "'markdown' for human-readable, 'json' for machine-readable."
+                "description": "'markdown' for human-readable, 'json' for machine-readable.",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               },
               "steamid": {
                 "anyOf": [
@@ -3147,22 +2365,10 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "SteamID64 (17 digits), vanity name, or full profile URL (e.g. '76561197960287930', 'gabelogannewell'). Omit to use the configured STEAM_USER (your own Steam name), if set.",
-                "title": "Steamid"
+                "description": "SteamID64 (17 digits), vanity name, or full profile URL (e.g. '76561197960287930', 'gabelogannewell'). Omit to use the configured STEAM_USER (your own Steam name), if set."
               }
             },
-            "title": "PlayerInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -3173,29 +2379,12 @@
         "required": [
           "params"
         ],
-        "title": "steam_resolve_vanity_urlArguments",
         "type": "object"
       },
-      "name": "steam_resolve_vanity_url",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_resolve_vanity_urlOutput",
-        "type": "object"
-      }
+      "name": "steam_resolve_vanity_url"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Search Steam Store Apps"
       },
@@ -3209,7 +2398,6 @@
                 "default": "us",
                 "maxLength": 2,
                 "minLength": 2,
-                "title": "Country Code",
                 "type": "string"
               },
               "language": {
@@ -3217,7 +2405,6 @@
                 "description": "Steam language name for localized result names. Not ISO codes.",
                 "maxLength": 32,
                 "minLength": 2,
-                "title": "Language",
                 "type": "string"
               },
               "limit": {
@@ -3225,35 +2412,27 @@
                 "description": "Max results (1-25).",
                 "maximum": 25,
                 "minimum": 1,
-                "title": "Limit",
                 "type": "integer"
               },
               "query": {
                 "description": "Game title (or partial title) to search for.",
                 "maxLength": 200,
                 "minLength": 1,
-                "title": "Query",
                 "type": "string"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               }
             },
             "required": [
               "query"
             ],
-            "title": "AppSearchInput",
             "type": "object"
-          },
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
           }
         },
         "properties": {
@@ -3264,63 +2443,39 @@
         "required": [
           "params"
         ],
-        "title": "steam_search_appsArguments",
         "type": "object"
       },
-      "name": "steam_search_apps",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_search_appsOutput",
-        "type": "object"
-      }
+      "name": "steam_search_apps"
     },
     {
       "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": true,
         "readOnlyHint": true,
         "title": "Steam Buying Brief (Should I Buy?)"
       },
-      "description": "Decide whether to buy ONE specific game — price, recent + lifetime reviews, tags, Metacritic, and taste match in one call; for evaluating a single known game, not finding new ones. [works without a key unless you pass steamid]",
+      "description": "Decide whether to buy ONE specific game — price, recent + lifetime reviews, tags, Metacritic, and taste match in one call; for evaluating a single known game, not finding new ones.",
       "inputSchema": {
         "$defs": {
-          "ResponseFormat": {
-            "description": "Output format for tool responses.",
-            "enum": [
-              "markdown",
-              "json"
-            ],
-            "title": "ResponseFormat",
-            "type": "string"
-          },
           "ShouldIBuyInput": {
             "additionalProperties": false,
             "properties": {
               "appid": {
                 "description": "Steam application (game) ID to evaluate.",
                 "minimum": 1,
-                "title": "Appid",
                 "type": "integer"
               },
               "country_code": {
                 "default": "us",
                 "maxLength": 2,
                 "minLength": 2,
-                "title": "Country Code",
                 "type": "string"
               },
               "response_format": {
-                "$ref": "#/$defs/ResponseFormat",
-                "default": "markdown"
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
               },
               "steamid": {
                 "anyOf": [
@@ -3332,15 +2487,12 @@
                     "type": "null"
                   }
                 ],
-                "default": null,
-                "description": "Optional: personalize — whether you already own it and how its tags match your most-played games. SteamID64, vanity, or profile URL.",
-                "title": "Steamid"
+                "description": "Optional: personalize — whether you already own it and how its tags match your most-played games. SteamID64, vanity, or profile URL."
               }
             },
             "required": [
               "appid"
             ],
-            "title": "ShouldIBuyInput",
             "type": "object"
           }
         },
@@ -3352,23 +2504,9 @@
         "required": [
           "params"
         ],
-        "title": "steam_should_i_buyArguments",
         "type": "object"
       },
-      "name": "steam_should_i_buy",
-      "outputSchema": {
-        "properties": {
-          "result": {
-            "title": "Result",
-            "type": "string"
-          }
-        },
-        "required": [
-          "result"
-        ],
-        "title": "steam_should_i_buyOutput",
-        "type": "object"
-      }
+      "name": "steam_should_i_buy"
     }
   ]
 }

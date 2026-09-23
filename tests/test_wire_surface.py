@@ -13,7 +13,11 @@ mechanically, so a reworded parameter description or a quietly added field
 reached clients unannounced. Now it fails CI instead.
 
 No network and no STEAM_API_KEY are needed: listing the surface never performs
-HTTP calls.
+HTTP calls. The snapshot is always taken as if a key were configured, because
+without one `_compact_descriptions()` appends an "[unavailable: needs
+STEAM_API_KEY]" marker to 19 descriptions; a snapshot that depended on the
+machine's .env would pass on one and fail on the other. The markers have their
+own tests in test_steam_mcp.py.
 
 Regenerating the golden file
 ----------------------------
@@ -33,7 +37,7 @@ import steam_mcp.server as S
 
 GOLDEN_PATH = Path(__file__).parent / "golden" / "wire_surface.json"
 
-EXPECTED_TOOLS = 37
+EXPECTED_TOOLS = 38
 EXPECTED_PROMPTS = 5
 EXPECTED_RESOURCE_TEMPLATES = 2
 
@@ -81,8 +85,16 @@ def _canonical_json(surface: dict) -> str:
     return json.dumps(surface, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
 
 
-def test_wire_surface_matches_golden_snapshot():
-    surface = run(_build_surface())
+def test_wire_surface_matches_golden_snapshot(monkeypatch):
+    # Pin the key state (see the module docstring), then put the descriptions
+    # back the way import left them so later tests see the real state.
+    monkeypatch.setattr(S, "_have_api_key", lambda: True)
+    S._compact_descriptions()
+    try:
+        surface = run(_build_surface())
+    finally:
+        monkeypatch.undo()
+        S._compact_descriptions()
 
     assert len(surface["tools"]) == EXPECTED_TOOLS
     assert len(surface["prompts"]) == EXPECTED_PROMPTS
@@ -93,7 +105,7 @@ def test_wire_surface_matches_golden_snapshot():
 
     if os.environ.get("UPDATE_GOLDEN") == "1":
         GOLDEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-        GOLDEN_PATH.write_text(actual_json, encoding="utf-8")
+        GOLDEN_PATH.write_text(actual_json, encoding="utf-8", newline="\n")
         return
 
     assert GOLDEN_PATH.exists(), (
