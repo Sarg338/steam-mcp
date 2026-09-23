@@ -11,7 +11,7 @@ description: >-
 
 # Steam
 
-Drives the `steam-mcp` server (read-only Steam Web API + storefront): 40 tools,
+Drives the `steam-mcp` server (read-only Steam Web API + storefront): 41 tools,
 plus 5 prompts and 2 resources.
 
 ## Token-efficient usage
@@ -31,6 +31,7 @@ plus 5 prompts and 2 resources.
 
 ## Common workflows
 
+- **Tell me about X** — `steam_analyze_game` gives the whole brief in one call.
 - **Game research** — `steam_get_app_details`, then `steam_get_app_reviews`
   (`review_filter='recent'` for the trend; `steam_analyze_app_reviews` for *why*:
   when it turned, which players, which languages), `steam_get_app_tags`,

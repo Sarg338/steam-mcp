@@ -23,7 +23,11 @@ name: Release
 
 on:
   schedule:
-    - cron: "15 3 * * *"   # daily, 03:15 UTC = 10:15pm US Central (CDT); 9:15pm in CST. Off the hour on purpose: GitHub delays or drops top-of-hour schedules under load
+    # Daily at 10:15pm US Central, all year (the timezone key follows daylight
+    # saving; bare cron is UTC). Off the hour on purpose: GitHub delays or drops
+    # top-of-hour schedules under load.
+    - cron: "15 22 * * *"
+      timezone: "America/Chicago"
   workflow_dispatch:
     inputs:
       level:

@@ -9,7 +9,7 @@
 [![MCP Registry](https://img.shields.io/badge/MCP%20Registry-io.github.Sarg338%2Fsteam--mcp-blue)](https://registry.modelcontextprotocol.io)
 
 A read-only [Model Context Protocol](https://modelcontextprotocol.io) server for the
-public Steam Web API and storefront — **40 tools, 5 prompts, and 2 resources** that let
+public Steam Web API and storefront — **41 tools, 5 prompts, and 2 resources** that let
 any MCP client (Claude Desktop, Claude Code, Cursor, …) answer questions about Steam:
 your friends, games, playtime, and achievements, plus account-independent things like
 sales, reviews, live player counts, Steam Deck compatibility, discovery,
@@ -28,7 +28,7 @@ Install [`uv`](https://docs.astral.sh/uv/), then:
 claude mcp add steam -- uvx steam-mcp
 ```
 
-That's the whole setup. **18 of the 40 tools work with no credential at all** — anything
+That's the whole setup. **19 of the 41 tools work with no credential at all** — anything
 about the store or a game itself:
 
 > *"Is Baldur's Gate 3 worth buying, and how are its recent reviews trending?"*
@@ -123,6 +123,7 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_get_workshop_item` | **Workshop item** metadata (game, tags, subscribers, favorites, views) | no |
 | `steam_get_app_tags` | **A game's top community tags** (Souls-like, Roguelike, Cozy…) | no |
 | `steam_get_app_reviews` | Lifetime verdict, +/- counts, sample reviews; optional **recent (last-N-days) score** via `review_filter='recent'` | no |
+| `steam_analyze_game` | **One-call brief on a game**: price, all-time and 30-day reviews, players now, Deck, tags, the latest update's effect on reviews, and news | no |
 | `steam_compare_games` | **Compare 2-5 games side by side**: price, reviews and their trend, players now, Steam Deck, co-op, tags | no |
 | `steam_get_update_impact` | **Did an update change the reviews?** Review score in the days before vs after each recent patch | no |
 | `steam_analyze_app_reviews` | **Analyze thousands of reviews**: sentiment over time, by language and playtime, Steam Deck, key activations vs Steam purchases, refunds, developer replies | no |
@@ -182,7 +183,7 @@ the tools) and **resources** (reference Steam entities by URI):
 
 ### 1. Get a free Steam Web API key *(optional)*
 
-Skip this if you only want the 18 keyless tools — the server runs fine without a
+Skip this if you only want the 19 keyless tools — the server runs fine without a
 key and the account tools simply advertise themselves as unavailable.
 
 To unlock the account tools, visit <https://steamcommunity.com/dev/apikey>, sign in,
@@ -221,6 +222,14 @@ whenever you don't name a user, so you never paste a SteamID. It's a public prof
 name, not a secret, and you can still pass a `steamid` to any call to override it.
 
 Configure neither and you get the keyless server; configure both and you get everything.
+
+**Smaller tool set (optional).** Every tool's definition goes into the model's context
+on every request, about 11.5k tokens for all 41. Set `STEAM_MCP_TOOLS=essentials` to
+load just 15: search, the one-call game brief, details, reviews, compare, should-I-buy,
+discover, recommend, update impact, sales, and your profile, library, library analysis,
+wishlist and co-op night. Add others by name (`essentials,get_inventory`), or list
+exactly the ones you want. The default is `all`. The built-in prompts may mention a
+tool your set leaves out.
 
 **Claude Code**
 

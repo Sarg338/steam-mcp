@@ -2182,7 +2182,7 @@ def test_friends_who_own(monkeypatch):
 
 def test_server_registers_its_surface():
     """The server object builds on whichever SDK major is installed."""
-    assert len(S.mcp._tool_manager.list_tools()) == 40
+    assert len(S.mcp._tool_manager.list_tools()) == 41
     assert len(S.mcp._prompt_manager.list_prompts()) == 5
 
 
@@ -2586,7 +2586,7 @@ def test_readme_key_column_matches_the_code():
         encoding="utf-8"
     )
     rows = re.findall(r"^\| `(steam_\w+)` \|.*\| (no\*|no|yes†|yes) \|$", readme, re.M)
-    assert len(rows) == 40, f"parsed {len(rows)} tool rows, expected 40"
+    assert len(rows) == 41, f"parsed {len(rows)} tool rows, expected 41"
     for name, marker in rows:
         if marker == "no":
             assert name in S.KEYLESS_TOOLS, f"{name} documented keyless, is not"
@@ -3494,6 +3494,7 @@ def _summary(pos, neg, desc="Very Positive"):
 
 
 def test_recent_score_is_one_exact_windowed_request(monkeypatch):
+    import time as _t
     calls = []
 
     async def fake_raw(url, params, cache_ttl=0):
@@ -3517,8 +3518,10 @@ def test_recent_score_is_one_exact_windowed_request(monkeypatch):
     assert len(win) == 1 and not any(c["filter"] == "recent" for c in calls)  # no scan
     w = win[0]
     assert w["date_range_type"] == "include" and w["purchase_type"] == "steam"
-    assert w["end_date"] - w["start_date"] == 30 * 86400
-    assert w["end_date"] % 3600 == 0                       # hour-aligned: cacheable
+    # the store counts from UTC midnight 30 days ago, through now
+    assert w["start_date"] % 86400 == 0
+    assert w["start_date"] == (int(_t.time()) // 86400 - 30) * 86400
+    assert w["end_date"] % 3600 == 0 and w["end_date"] >= _t.time()
 
 
 def test_recent_score_falls_back_to_the_scan_when_refused(monkeypatch):
@@ -3711,3 +3714,155 @@ def test_update_impact_with_no_updates(monkeypatch):
     _impact_fakes(monkeypatch, [], lambda s, e: _summary(1, 1))
     md = run(S.steam_get_update_impact(S.UpdateImpactInput(appid=1)))
     assert "No update or patch-note posts" in md
+
+
+# --------------------------------------------------------------------------- #
+# STEAM_MCP_TOOLS: an opt-in smaller tool set
+# --------------------------------------------------------------------------- #
+
+def test_essentials_are_all_registered_tools():
+    registered = set(S.mcp._tool_manager._tools)
+    assert S.ESSENTIAL_TOOLS <= registered
+    assert len(S.ESSENTIAL_TOOLS) == 15
+
+
+def test_tool_selection_rules():
+    reg = {"steam_a", "steam_b", "steam_get_inventory"} | set(S.ESSENTIAL_TOOLS)
+    keep, bad = S._tool_selection("essentials", reg)
+    assert keep == set(S.ESSENTIAL_TOOLS) and bad == []
+    keep, bad = S._tool_selection("Essentials, get_inventory, steam_a", reg)
+    assert keep == set(S.ESSENTIAL_TOOLS) | {"steam_get_inventory", "steam_a"}
+    keep, bad = S._tool_selection("steam_b,nope", reg)
+    assert keep == {"steam_b"} and bad == ["nope"]
+    assert S._tool_selection("nope", reg)[0] == reg          # nothing left: keep all
+    assert S._tool_selection("all", reg)[0] == reg
+    assert S._tool_selection(" , ", reg)[0] == reg
+
+
+class _FakeManager:
+    def __init__(self, names, with_remove):
+        self._tools = {n: object() for n in names}
+        if with_remove:
+            self.remove_tool = lambda name: self._tools.pop(name)
+
+
+@pytest.mark.parametrize("with_remove", [True, False])   # v2 SDK / v1 SDK
+def test_apply_tool_profile_unregisters_the_rest(monkeypatch, with_remove):
+    fake = _FakeManager(["steam_search_apps", "steam_get_inventory",
+                         "steam_get_friend_list"], with_remove)
+    monkeypatch.setattr(S.mcp, "_tool_manager", fake)
+    monkeypatch.setenv(S.ENV_TOOLS, "essentials,get_friend_list")
+    S._apply_tool_profile()
+    assert set(fake._tools) == {"steam_search_apps", "steam_get_friend_list"}
+
+
+def test_apply_tool_profile_leaves_everything_by_default(monkeypatch):
+    fake = _FakeManager(["steam_search_apps", "steam_get_inventory"], True)
+    monkeypatch.setattr(S.mcp, "_tool_manager", fake)
+    monkeypatch.delenv(S.ENV_TOOLS, raising=False)
+    monkeypatch.setattr(S, "_dotenv_value", lambda name: "")
+    S._apply_tool_profile()
+    assert len(fake._tools) == 2
+
+
+# --------------------------------------------------------------------------- #
+# steam_analyze_game: the one-call brief
+# --------------------------------------------------------------------------- #
+
+def _analyze_game_fakes(monkeypatch, row=None, updates=None, news=None):
+    base = {"appid": 7, "name": "Seven", "price": "$19.99", "discount_pct": 25,
+            "release_date": "Jan 1, 2024", "developers": ["Dev Co"],
+            "genres": ["Action"], "short_description": "A game about seven.",
+            "review_score_desc": "Very Positive", "positive_pct": 90.0,
+            "total_reviews": 12_000, "recent_positive_pct": 80.0,
+            "recent_reviews": 400, "recent_sampled": False, "trend_pts": -10.0,
+            "players_now": 3210, "steam_deck": "Verified", "metacritic": 81,
+            "achievements_total": 1, "dlc_count": 2, "platforms": ["windows"],
+            "singleplayer": True, "online_coop": True, "local_coop": False,
+            "multiplayer": False, "controller_support": "full"}
+
+    async def fake_row(appid, cc):
+        return row if row is not None else base
+
+    async def fake_tags(appids):
+        return {7: [{"tagid": 1}, {"tagid": 2}]}
+
+    async def fake_names():
+        return {1: "Roguelike", 2: "Co-op"}
+
+    async def fake_impact(p):
+        return json.dumps({"updates": updates or []})
+
+    async def fake_news(appid, count=3):
+        return news or []
+
+    for name, fn in (("_compare_row", fake_row), ("_items_tags", fake_tags),
+                     ("_tag_name_map", fake_names),
+                     ("steam_get_update_impact", fake_impact),
+                     ("_announcements", fake_news)):
+        monkeypatch.setattr(S, name, fn)
+
+
+def test_analyze_game_brief(monkeypatch):
+    update = {"date": "2026-09-20", "title": "Patch 1.2", "url": "u",
+              "before": {"reviews": 300, "positive_pct": 85.0},
+              "after": {"reviews": 250, "positive_pct": 78.0},
+              "change_pts": -7.0, "after_window_complete": False,
+              "next_update_within_window": False}
+    _analyze_game_fakes(monkeypatch, updates=[update],
+                        news=[{"date": "2026-09-20", "title": "Patch 1.2", "url": "u"}])
+    d = json.loads(run(S.steam_analyze_game(S.AnalyzeGameInput(
+        appid=7, response_format="json"))))
+    assert d["top_tags"] == ["Roguelike", "Co-op"]
+    assert d["latest_update"]["change_pts"] == -7.0 and d["players_now"] == 3210
+    md = run(S.steam_analyze_game(S.AnalyzeGameInput(appid=7)))
+    assert "# Seven (appid 7)" in md and "$19.99 (-25% off)" in md
+    assert "80.0% of 400, -10.0 pts vs all-time" in md
+    assert "1 achievement ·" in md and "2 DLC" in md          # singular / plural
+    assert "85.0% → 78.0% (-7.0 pts), still settling" in md
+    assert "## Recent announcements" in md
+
+
+def test_analyze_game_without_updates_or_news(monkeypatch):
+    _analyze_game_fakes(monkeypatch)
+    md = run(S.steam_analyze_game(S.AnalyzeGameInput(appid=7)))
+    assert "Latest update" not in md and "Recent announcements" not in md
+
+
+def test_analyze_game_passes_on_a_bad_appid(monkeypatch):
+    _analyze_game_fakes(monkeypatch, row={"appid": 7, "error": "No store details."})
+    assert run(S.steam_analyze_game(S.AnalyzeGameInput(appid=7))) == "No store details."
+
+
+def test_a_new_clients_first_request_runs_alone(monkeypatch):
+    """Cold-start TLS race guard: until one request has completed, nothing else
+    goes out on a fresh shared client; afterwards requests overlap as usual."""
+    active = peak = 0
+    log = []
+
+    class FakeClient:
+        is_closed = False
+
+        async def get(self, url, **kw):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            log.append(active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return url
+
+    async def go():
+        fake = FakeClient()
+        monkeypatch.setattr(S, "_CLIENT", fake)
+        monkeypatch.setattr(S, "_CLIENT_WARM", False)
+        monkeypatch.setattr(S, "_WARM_LOCK", asyncio.Lock())
+        out = await asyncio.gather(*(S._send(fake, "get", f"u{i}") for i in range(5)))
+        return out
+
+    import asyncio
+    out = run(go())
+    assert out == [f"u{i}" for i in range(5)]
+    assert log[:2] == [1, 1]           # the 2nd started only after the 1st ended
+    assert peak > 1                    # the rest still ran concurrently
+    assert S._CLIENT_WARM is True
