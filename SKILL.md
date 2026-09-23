@@ -11,7 +11,7 @@ description: >-
 
 # Steam
 
-Drives the `steam-mcp` server (read-only Steam Web API + storefront): 38 tools,
+Drives the `steam-mcp` server (read-only Steam Web API + storefront): 40 tools,
 plus 5 prompts and 2 resources.
 
 ## Token-efficient usage
@@ -35,6 +35,8 @@ plus 5 prompts and 2 resources.
   (`review_filter='recent'` for the trend; `steam_analyze_app_reviews` for *why*:
   when it turned, which players, which languages), `steam_get_app_tags`,
   `steam_get_current_players`.
+- **X or Y?** — `steam_compare_games` (2-5 appids). **Did a patch hurt it?** —
+  `steam_get_update_impact`.
 - **Should I buy it** — `steam_should_i_buy` (pass `steamid` to personalize). Prices
   by region: `steam_get_app_regional_pricing`. An item/skin's value:
   `steam_get_market_price`.

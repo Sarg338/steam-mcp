@@ -6,6 +6,9 @@ A concise, one-line-per-change history. Versions follow
 
 ## [Unreleased]
 <!-- release: minor -->
+- **New tool: `steam_compare_games`.**
+- **New tool: `steam_get_update_impact`.**
+- **Recent review scores are now exact, not sampled.**
 - **Fixed: search put sequels and DLC ahead of the exact title.**
 - **Search results say whether each is a game, DLC or soundtrack.**
 - **Fixed: empty results broke JSON output in five list tools.**

@@ -34,6 +34,7 @@ import time
 from collections import Counter, OrderedDict
 from contextvars import ContextVar
 from enum import Enum
+from collections.abc import Callable
 from typing import Annotated, Any, Optional
 from urllib.parse import quote, urlsplit
 
@@ -121,7 +122,7 @@ mcp = _build_server()
 #
 # Tool annotations carry only `title` and `readOnlyHint: true`. The spec makes
 # destructiveHint and idempotentHint meaningful only when readOnlyHint is false,
-# and openWorldHint already defaults to true, so spelling them out on all 38
+# and openWorldHint already defaults to true, so spelling them out on all 40
 # tools was ~0.6k tokens of tools/list that told a client nothing.
 
 # Security: the HTTP stack logs full request URLs at INFO, and Steam requires the
@@ -390,6 +391,7 @@ def _load_key_from_dotenv() -> str:
 # so adding a tool to the wrong bucket is caught in CI rather than by a user.
 KEYLESS_TOOLS = frozenset({
     "steam_analyze_app_reviews",
+    "steam_compare_games",
     "steam_get_app_details",
     "steam_get_app_news",
     "steam_get_app_regional_pricing",
@@ -403,6 +405,7 @@ KEYLESS_TOOLS = frozenset({
     "steam_get_market_price",
     "steam_get_package_details",
     "steam_get_store_highlights",
+    "steam_get_update_impact",
     "steam_get_workshop_item",
     "steam_search_apps",
 })
@@ -1332,8 +1335,8 @@ class AppReviewsInput(BaseModel):
     )
     recent_max_reviews: int = Field(
         default=MAX_RECENT_PAGES * RECENT_PAGE_SIZE,
-        description="Most reviews to tally for review_filter='recent' (100-10000). "
-        "Raise it for busy games so the recent score isn't 'sampled'.",
+        description="Fallback only: most reviews to count for review_filter="
+        "'recent' if Steam refuses the exact count (100-10000).",
         ge=100,
         le=10_000,
     )
@@ -3531,6 +3534,73 @@ def _fmt_review(r: dict) -> dict:
     }
 
 
+async def _review_window(
+    appid: int, start: float, end: float, *, language: str, purchase_type: str,
+    cc: str, num_per_page: int = 0,
+) -> dict | None:
+    """Steam's review summary for reviews written in [start, end], one request.
+
+    appreviews takes start_date / end_date with date_range_type=include and then
+    scores only that window: the store's "last 30 days" row, exactly (verified
+    live 2026-09 against seven store pages, and back to 2023 for Cyberpunk's 2.0
+    launch). With num_per_page > 0 it also returns that window's most helpful
+    reviews. None if Steam refuses, so callers can fall back to a scan.
+    """
+    try:
+        data = await _raw_get(
+            f"https://store.steampowered.com/appreviews/{appid}",
+            {"json": 1, "filter": "all", "language": language, "review_type": "all",
+             "purchase_type": purchase_type, "num_per_page": num_per_page,
+             "cc": cc, "start_date": int(start), "end_date": int(end),
+             "date_range_type": "include"},
+            cache_ttl=CACHE_TTL_REVIEWS,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(data, dict) or data.get("success") != 1 \
+            or not isinstance(data.get("query_summary"), dict):
+        return None
+    return data
+
+
+def _window_block(summary: dict) -> dict:
+    n = summary.get("total_reviews") or 0
+    pos = summary.get("total_positive") or 0
+    return {"reviews": n, "positive": pos, "negative": n - pos,
+            "positive_pct": round(100.0 * pos / n, 1) if n else None,
+            "review_score_desc": summary.get("review_score_desc") if n else None}
+
+
+async def _recent_reviews(
+    appid: int, day_range: int, cc: str, *, language: str, purchase_type: str,
+    max_reviews: int | None = None, excerpts: int = 0,
+) -> tuple[dict, list[dict]]:
+    """(recent block, reviews to excerpt) for the last `day_range` days.
+
+    One windowed request gives the exact count and score. If Steam refuses it,
+    fall back to tallying the newest reviews (capped, so marked `sampled`).
+    """
+    end = (time.time() // 3600 + 1) * 3600  # the hour boundary keeps it cacheable
+    win = await _review_window(appid, end - day_range * 86400, end,
+                               language=language, purchase_type=purchase_type,
+                               cc=cc, num_per_page=excerpts)
+    if win is not None:
+        b = _window_block(win["query_summary"])
+        return ({"day_range": day_range, "reviews_counted": b["reviews"],
+                 "positive": b["positive"], "negative": b["negative"],
+                 "positive_pct": b["positive_pct"] or 0.0,
+                 "review_score_desc": b["review_score_desc"], "sampled": False},
+                win.get("reviews") or [])
+    window, capped = await _collect_recent_reviews(
+        appid, day_range, cc, language, purchase_type, max_reviews)
+    rpos = sum(1 for r in window if r.get("voted_up"))
+    return ({"day_range": day_range, "reviews_counted": len(window),
+             "positive": rpos, "negative": len(window) - rpos,
+             "positive_pct": round(100.0 * rpos / len(window), 1) if window else 0.0,
+             "review_score_desc": None, "sampled": capped},
+            window)
+
+
 def _store_purchase_type(is_free: bool | None) -> str:
     """The review population the store page scores a game on.
 
@@ -3687,21 +3757,11 @@ async def steam_get_app_reviews(params: AppReviewsInput) -> str:
 
         recent = None
         if params.review_filter == "recent":
-            window, capped = await _collect_recent_reviews(
-                params.appid, params.day_range, params.country_code, params.language,
-                purchase, params.recent_max_reviews,
+            recent, window = await _recent_reviews(
+                params.appid, params.day_range, params.country_code,
+                language=params.language, purchase_type=purchase,
+                max_reviews=params.recent_max_reviews, excerpts=params.limit,
             )
-            rpos = sum(1 for r in window if r.get("voted_up"))
-            rneg = len(window) - rpos
-            rpct = round(100.0 * rpos / len(window), 1) if window else 0.0
-            recent = {
-                "day_range": params.day_range,
-                "reviews_counted": len(window),
-                "positive": rpos,
-                "negative": rneg,
-                "positive_pct": rpct,
-                "sampled": capped,
-            }
             sample_src = window
         elif separate_excerpts:
             try:
@@ -3756,9 +3816,11 @@ async def steam_get_app_reviews(params: AppReviewsInput) -> str:
         elif recent is not None:
             note = (" (sampled — capped; raise recent_max_reviews)"
                     if recent["sampled"] else "")
+            desc = (f"{recent['review_score_desc']} — "
+                    if recent.get("review_score_desc") else "")
             lines.append(
-                f"- **Recent (last {recent['day_range']}d)**: "
-                f"{recent['positive_pct']}% of {recent['reviews_counted']} "
+                f"- **Recent (last {recent['day_range']}d)**: {desc}"
+                f"{recent['positive_pct']}% of {recent['reviews_counted']:,} "
                 f"reviews{note}"
             )
         lines.append(f"- *Counted: {params.language} reviews, {who}.*")
@@ -3854,6 +3916,85 @@ def _review_segments(r: dict) -> list[str]:
     return segs
 
 
+async def _scan_reviews(
+    appid: int, *, language: str, purchase_type: str, cc: str, max_reviews: int,
+    on_review: Callable[[dict, int, int], None], cutoff: float | None = None,
+    cursor: str = "*",
+) -> dict:
+    """Page through a game's reviews newest-first, calling `on_review` for each.
+
+    `on_review(review, timestamp, sequence)` sees every review once: pages
+    overlap when new reviews land mid-scan, so ids are de-duplicated across the
+    whole scan. The scan stops at `max_reviews`, at `cutoff` (unix seconds), or
+    when Steam runs out. A failed page never raises: callers keep what was
+    already counted, and `next_cursor` resumes from the page that failed.
+
+    Returns {reviews, stop_reason, next_cursor, error, lifetime}; `lifetime` is
+    the query_summary Steam sends with the first page of a fresh scan.
+    """
+    seen_cursors = {cursor}
+    seen_ids: set = set()
+    n = 0
+    lifetime = None
+    stop, next_cursor, error = "exhausted", None, None
+    # A few pages of slack so a run of duplicates can't end the scan early.
+    max_pages = -(-max_reviews // RECENT_PAGE_SIZE) + 5
+    for _ in range(max_pages):
+        try:
+            data = await _raw_get(
+                f"https://store.steampowered.com/appreviews/{appid}",
+                {"json": 1, "filter": "recent", "language": language,
+                 "review_type": "all", "purchase_type": purchase_type,
+                 "num_per_page": min(RECENT_PAGE_SIZE, max_reviews - n),
+                 "cc": cc, "cursor": cursor},
+            )
+        except Exception as e:  # noqa: BLE001
+            # Keep what was tallied: losing thousands of counted reviews to
+            # one timed-out page is the worse outcome. next_cursor resumes.
+            stop, next_cursor, error = "request_error", cursor, _handle_error(e)
+            break
+        if not isinstance(data, dict) or data.get("success") != 1:
+            stop, next_cursor = "request_error", cursor
+            error = "Steam refused a review page; retry with next_cursor."
+            break
+        if lifetime is None and cursor == "*":
+            lifetime = data.get("query_summary") or None
+        revs = data.get("reviews") or []
+        if not revs:
+            break
+        at_edge = False
+        for r in revs:
+            try:
+                ts = int(r.get("timestamp_created") or 0)
+            except (TypeError, ValueError):
+                ts = 0
+            if cutoff is not None and ts and ts < cutoff:
+                at_edge = True
+                break
+            rid = r.get("recommendationid")
+            if rid is not None:
+                if rid in seen_ids:
+                    continue
+                seen_ids.add(rid)
+            n += 1
+            on_review(r, ts, n)
+        nxt = data.get("cursor")
+        if at_edge:
+            stop = "window_edge"
+            break
+        if not nxt or nxt in seen_cursors:
+            break
+        seen_cursors.add(nxt)
+        cursor = nxt
+        if n >= max_reviews:
+            stop, next_cursor = "max_reviews", nxt
+            break
+    else:
+        stop, next_cursor = "max_reviews", cursor
+    return {"reviews": n, "stop_reason": stop, "next_cursor": next_cursor,
+            "error": error, "lifetime": lifetime}
+
+
 @mcp.tool(
     name="steam_analyze_app_reviews",
     structured_output=False,
@@ -3888,11 +4029,7 @@ async def steam_analyze_app_reviews(params: ReviewAnalysisInput) -> str:
         cc = params.country_code
         purchase = await _resolve_purchase_type(params.purchase_type, params.appid, cc)
         cutoff = time.time() - params.day_range * 86400 if params.day_range else None
-        cursor = params.cursor
-        seen_cursors = {cursor}
-        seen_ids: set = set()
-        n = pos = 0
-        lifetime = None
+        pos = 0
         newest_ts = oldest_ts = None
         day_counts: Counter = Counter()
         day_pos: Counter = Counter()
@@ -3906,92 +4043,49 @@ async def steam_analyze_app_reviews(params: ReviewAnalysisInput) -> str:
         lengths: list[int] = []
         newest: dict[str, list] = {"positive": [], "negative": []}
         helpful: dict[str, list] = {"positive": [], "negative": []}
-        stop, next_cursor, error = "exhausted", None, None
-        # A few pages of slack so a run of duplicates can't end the scan early.
-        max_pages = -(-params.max_reviews // RECENT_PAGE_SIZE) + 5
 
-        for _ in range(max_pages):
-            want = min(RECENT_PAGE_SIZE, params.max_reviews - n)
-            try:
-                data = await _raw_get(
-                    f"https://store.steampowered.com/appreviews/{params.appid}",
-                    {"json": 1, "filter": "recent", "language": params.language,
-                     "review_type": "all", "purchase_type": purchase,
-                     "num_per_page": want, "cc": cc, "cursor": cursor},
-                )
-            except Exception as e:  # noqa: BLE001
-                # Keep what was tallied: losing thousands of counted reviews to
-                # one timed-out page is the worse outcome. next_cursor resumes.
-                stop, next_cursor, error = "request_error", cursor, _handle_error(e)
-                break
-            if not isinstance(data, dict) or data.get("success") != 1:
-                stop, next_cursor = "request_error", cursor
-                error = "Steam refused a review page; retry with next_cursor."
-                break
-            if lifetime is None and cursor == "*":
-                lifetime = data.get("query_summary") or None
-            revs = data.get("reviews") or []
-            if not revs:
-                break
-            at_edge = False
-            for r in revs:
-                try:
-                    ts = int(r.get("timestamp_created") or 0)
-                except (TypeError, ValueError):
-                    ts = 0
-                if cutoff is not None and ts and ts < cutoff:
-                    at_edge = True
-                    break
-                rid = r.get("recommendationid")
-                if rid is not None:
-                    if rid in seen_ids:
-                        continue  # pages overlap when new reviews land mid-scan
-                    seen_ids.add(rid)
-                up = bool(r.get("voted_up"))
-                side = "positive" if up else "negative"
-                n += 1
-                pos += up
-                if ts:
-                    newest_ts = ts if newest_ts is None else max(newest_ts, ts)
-                    oldest_ts = ts if oldest_ts is None else min(oldest_ts, ts)
-                    day = time.strftime("%Y-%m-%d", time.gmtime(ts))
-                    day_counts[day] += 1
-                    day_pos[day] += up
-                lang = str(r.get("language") or "unknown")
-                lang_counts[lang] += 1
-                lang_pos[lang] += up
-                for seg in _review_segments(r):
-                    seg_counts[seg] += 1
-                    seg_pos[seg] += up
-                minutes = (r.get("author") or {}).get("playtime_at_review")
-                bucket = _playtime_bucket(minutes)
-                play_counts[bucket] += 1
-                play_pos[bucket] += up
-                if isinstance(minutes, (int, float)) and minutes >= 0:
-                    play_minutes.append(int(minutes))
-                lengths.append(len((r.get("review") or "").strip()))
-                if params.samples:
-                    if len(newest[side]) < params.samples:
-                        newest[side].append(r)
-                    item = (int(r.get("votes_up") or 0), -n, r)
-                    heap = helpful[side]
-                    if len(heap) < params.samples:
-                        heapq.heappush(heap, item)
-                    elif item[:2] > heap[0][:2]:
-                        heapq.heapreplace(heap, item)
-            nxt = data.get("cursor")
-            if at_edge:
-                stop = "window_edge"
-                break
-            if not nxt or nxt in seen_cursors:
-                break
-            seen_cursors.add(nxt)
-            cursor = nxt
-            if n >= params.max_reviews:
-                stop, next_cursor = "max_reviews", nxt
-                break
-        else:
-            stop, next_cursor = "max_reviews", cursor
+        def tally(r: dict, ts: int, seq: int) -> None:
+            nonlocal pos, newest_ts, oldest_ts
+            up = bool(r.get("voted_up"))
+            side = "positive" if up else "negative"
+            pos += up
+            if ts:
+                newest_ts = ts if newest_ts is None else max(newest_ts, ts)
+                oldest_ts = ts if oldest_ts is None else min(oldest_ts, ts)
+                day = time.strftime("%Y-%m-%d", time.gmtime(ts))
+                day_counts[day] += 1
+                day_pos[day] += up
+            lang = str(r.get("language") or "unknown")
+            lang_counts[lang] += 1
+            lang_pos[lang] += up
+            for seg in _review_segments(r):
+                seg_counts[seg] += 1
+                seg_pos[seg] += up
+            minutes = (r.get("author") or {}).get("playtime_at_review")
+            bucket = _playtime_bucket(minutes)
+            play_counts[bucket] += 1
+            play_pos[bucket] += up
+            if isinstance(minutes, (int, float)) and minutes >= 0:
+                play_minutes.append(int(minutes))
+            lengths.append(len((r.get("review") or "").strip()))
+            if params.samples:
+                if len(newest[side]) < params.samples:
+                    newest[side].append(r)
+                item = (int(r.get("votes_up") or 0), -seq, r)
+                heap = helpful[side]
+                if len(heap) < params.samples:
+                    heapq.heappush(heap, item)
+                elif item[:2] > heap[0][:2]:
+                    heapq.heapreplace(heap, item)
+
+        scan = await _scan_reviews(
+            params.appid, language=params.language, purchase_type=purchase, cc=cc,
+            max_reviews=params.max_reviews, on_review=tally, cutoff=cutoff,
+            cursor=params.cursor,
+        )
+        n, lifetime = scan["reviews"], scan["lifetime"]
+        stop, next_cursor, error = (scan["stop_reason"], scan["next_cursor"],
+                                    scan["error"])
 
         def _group(counts: Counter, positives: Counter, key: str) -> dict:
             return {"reviews": counts[key], "share_pct": _pct_of(counts[key], n),
@@ -4114,6 +4208,378 @@ def _analysis_markdown(out: dict) -> str:
             for r in out["samples"][key]:
                 lines.append(f"- ({r['playtime_hours']}h played, {r['votes_up']} "
                              f"found helpful): {r['excerpt']}")
+    return "\n".join(lines)
+
+
+class CompareGamesInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    appids: list[int] = Field(
+        ...,
+        description="2-5 appids to compare side by side (resolve names with "
+        "steam_search_apps first).",
+        min_length=2,
+        max_length=5,
+    )
+    country_code: str = Field(default="us", min_length=2, max_length=2)
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+    @field_validator("appids")
+    @classmethod
+    def _check_appids(cls, v: list[int]) -> list[int]:
+        out = []
+        for a in v:
+            if a < 1:
+                raise ValueError("appids must be positive")
+            if a not in out:
+                out.append(a)
+        if len(out) < 2:
+            raise ValueError("give at least two different appids")
+        return out
+
+
+def _json_or_none(text: str) -> dict | None:
+    """A tool's JSON result, or None when it returned an error sentence."""
+    try:
+        out = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    return out if isinstance(out, dict) else None
+
+
+async def _compare_row(appid: int, cc: str) -> dict:
+    """Everything steam_compare_games shows for one game, from our own tools."""
+    details_s, reviews_s, players_s = await asyncio.gather(
+        steam_get_app_details(AppDetailsInput(
+            appid=appid, country_code=cc, response_format=ResponseFormat.JSON)),
+        steam_get_app_reviews(AppReviewsInput(
+            appid=appid, limit=0, review_filter="recent", country_code=cc,
+            response_format=ResponseFormat.JSON)),
+        steam_get_current_players(AppOnlyInput(
+            appid=appid, response_format=ResponseFormat.JSON)),
+    )
+    d = _json_or_none(details_s)
+    if d is None:
+        return {"appid": appid, "error": details_s}
+    rv = _json_or_none(reviews_s) or {}
+    summ, recent = rv.get("summary") or {}, rv.get("recent") or {}
+    life_pct, recent_pct = summ.get("positive_pct"), recent.get("positive_pct")
+    feats = d.get("features") or {}
+    return {
+        "appid": appid,
+        "name": d.get("name"),
+        "price": d.get("price") or ("Free" if d.get("is_free") else None),
+        "discount_pct": d.get("discount_pct") or 0,
+        "release_date": d.get("release_date"),
+        "review_score_desc": summ.get("review_score_desc"),
+        "positive_pct": life_pct,
+        "total_reviews": summ.get("total_reviews"),
+        "recent_positive_pct": recent_pct if recent.get("reviews_counted") else None,
+        "recent_reviews": recent.get("reviews_counted"),
+        "recent_sampled": recent.get("sampled"),
+        "trend_pts": (round(recent_pct - life_pct, 1)
+                      if recent.get("reviews_counted") and life_pct is not None
+                      else None),
+        "players_now": (_json_or_none(players_s) or {}).get("current_players"),
+        "steam_deck": d.get("steam_deck"),
+        "metacritic": d.get("metacritic"),
+        "platforms": d.get("platforms") or [],
+        "singleplayer": feats.get("is_singleplayer"),
+        "multiplayer": feats.get("is_multiplayer"),
+        "online_coop": feats.get("is_online_coop"),
+        "local_coop": feats.get("is_local_coop"),
+        "controller_support": d.get("controller_support"),
+    }
+
+
+@mcp.tool(
+    name="steam_compare_games",
+    structured_output=False,
+    annotations={
+        "title": "Compare Steam Games Side by Side",
+        "readOnlyHint": True,
+    },
+)
+async def steam_compare_games(params: CompareGamesInput) -> str:
+    """Compare 2-5 games side by side — price, reviews and their trend, players now, Deck, co-op, tags — for "X or Y?" questions.
+
+    One call instead of five tools per game. Review scores count what the store
+    page counts; the recent score is the last 30 days. Also names the best-reviewed,
+    most-played and cheapest game and the tags they share, so the answer can say
+    how they differ. States facts, not a verdict. No API key required.
+
+    Args:
+        params (CompareGamesInput): appids (2-5), country_code.
+
+    Returns:
+        str: Markdown table or JSON: one row per game (price, discount, release,
+        review score + %, 30-day % and trend, players now, Deck, Metacritic,
+        platforms, play modes, top tags) plus `highlights`.
+    """
+    try:
+        cc = params.country_code
+        rows, tags_map, prices, name_map = await asyncio.gather(
+            asyncio.gather(*(_compare_row(a, cc) for a in params.appids)),
+            _items_tags(params.appids),
+            _app_prices(params.appids, cc),
+            _tag_name_map(),
+        )
+        tag_sets = {}
+        for row in rows:
+            names = []
+            for t in (tags_map.get(row["appid"]) or [])[:10]:
+                try:
+                    tname = name_map.get(int(t.get("tagid")))
+                except (TypeError, ValueError):
+                    tname = None
+                if tname:
+                    names.append(tname)
+            row["top_tags"] = names[:5]
+            tag_sets[row["appid"]] = set(names)
+            row["price_cents"] = (prices.get(row["appid"]) or {}).get("price_cents")
+
+        ok = [r for r in rows if not r.get("error")]
+
+        def best(key: str, lowest: bool = False) -> dict | None:
+            vals = [r for r in ok if r.get(key) is not None]
+            if len(vals) < 2:
+                return None
+            pick = (min if lowest else max)(vals, key=lambda r: r[key])
+            return {"appid": pick["appid"], "name": pick["name"], key: pick[key]}
+
+        shared = (set.intersection(*(tag_sets[r["appid"]] for r in ok))
+                  if len(ok) >= 2 else set())
+        highlights = {
+            "best_reviewed": best("positive_pct"),
+            "best_recent": best("recent_positive_pct"),
+            "most_played_now": best("players_now"),
+            "cheapest": best("price_cents", lowest=True),
+            "shared_tags": sorted(shared),
+        }
+        if params.response_format == ResponseFormat.JSON:
+            return _dump({"country": cc, "games": rows, "highlights": highlights})
+        return _compare_markdown(rows, highlights)
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
+
+
+def _compare_markdown(rows: list[dict], hl: dict) -> str:
+    def pct(v):
+        return "n/a" if v is None else f"{v}%"
+
+    def modes(r):
+        out = [label for key, label in (("singleplayer", "single"),
+                                        ("online_coop", "online co-op"),
+                                        ("local_coop", "local co-op"),
+                                        ("multiplayer", "multiplayer")) if r.get(key)]
+        return ", ".join(out) or "n/a"
+
+    lines = ["# Game comparison", "",
+             "| Game | Price | All-time reviews | Last 30 days | Playing now "
+             "| Deck | Modes |",
+             "|---|---|---|---|---|---|---|"]
+    for r in rows:
+        if r.get("error"):
+            lines.append(f"| appid {r['appid']} | {r['error']} | | | | | |")
+            continue
+        price = r["price"] or "n/a"
+        if r["discount_pct"]:
+            price += f" (-{r['discount_pct']}%)"
+        trend = ""
+        if r["trend_pts"] is not None:
+            trend = f" ({'+' if r['trend_pts'] >= 0 else ''}{r['trend_pts']})"
+        players = "n/a" if r["players_now"] is None else f"{r['players_now']:,}"
+        lines.append(
+            f"| **{r['name']}** ({r['appid']}) | {price} | "
+            f"{r['review_score_desc'] or 'n/a'}, {pct(r['positive_pct'])} | "
+            f"{pct(r['recent_positive_pct'])}{trend}"
+            f"{' (sampled)' if r['recent_sampled'] else ''} | {players} | "
+            f"{r['steam_deck'] or 'n/a'} | {modes(r)} |")
+    lines.append("")
+    for r in rows:
+        if not r.get("error") and r["top_tags"]:
+            lines.append(f"- {r['name']}: {', '.join(r['top_tags'])}")
+    picks = [(k, label) for k, label in (("best_reviewed", "Best reviewed"),
+                                         ("best_recent", "Best last 30 days"),
+                                         ("most_played_now", "Most played now"),
+                                         ("cheapest", "Cheapest"))]
+    lines.append("")
+    for key, label in picks:
+        if hl.get(key):
+            lines.append(f"- **{label}**: {hl[key]['name']}")
+    if hl["shared_tags"]:
+        lines.append(f"- **Shared tags**: {', '.join(hl['shared_tags'])}")
+    return "\n".join(lines)
+
+
+class UpdateImpactInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    appid: int = Field(..., description="Steam application (game) ID.", ge=1)
+    days: int = Field(
+        default=90,
+        description="How far back to look for updates (7-730 days).",
+        ge=7,
+        le=730,
+    )
+    window_days: int = Field(
+        default=7,
+        description="Days of reviews compared before and after each update (1-30).",
+        ge=1,
+        le=30,
+    )
+    language: str = Field(
+        default="all",
+        description="Steam language name, or 'all' (default) for every language.",
+        min_length=2, max_length=32,
+    )
+    purchase_type: str = Field(
+        default="store",
+        description="'store' (default, the store page's population), 'steam' or "
+        "'all'.",
+    )
+    country_code: str = Field(default="us", min_length=2, max_length=2)
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+    @field_validator("purchase_type")
+    @classmethod
+    def _check_purchase(cls, v: str) -> str:
+        return _check_purchase_type(v)
+
+
+# Patch posts aren't reliably tagged: CS2 and Dune tag theirs `patchnotes`, but
+# Cyberpunk's "Patch 2.31" and R.E.P.O.'s "v0.4.0 - The Cosmetic Update" are
+# untagged, so titles that read like an update count too — unless they read like
+# marketing ("Revealing UPDATE RELEASE DATE", trailers, sales).
+_UPDATE_TITLE_RE = re.compile(
+    r"\b(?:patch|hotfix|hot-fix|update|changelog)\b|\bv\d+\.\d+", re.I)
+_NOT_UPDATE_TITLE_RE = re.compile(
+    r"\b(?:release date|trailer|teaser|reveal(?:ing|ed)?|coming|sale|giveaway|"
+    r"showcase|roadmap)\b|streams?\b", re.I)
+UPDATE_MIN_REVIEWS = 20   # per side, before a change in % is worth reporting
+UPDATE_MAX_EVENTS = 20    # newest updates compared (two requests each)
+
+
+def _is_update_post(item: dict) -> bool:
+    if "patchnotes" in (item.get("tags") or []):
+        return True
+    title = item.get("title") or ""
+    return bool(_UPDATE_TITLE_RE.search(title)) \
+        and not _NOT_UPDATE_TITLE_RE.search(title)
+
+
+@mcp.tool(
+    name="steam_get_update_impact",
+    structured_output=False,
+    annotations={
+        "title": "Did a Steam Game's Updates Change Its Reviews?",
+        "readOnlyHint": True,
+    },
+)
+async def steam_get_update_impact(params: UpdateImpactInput) -> str:
+    """Show how a game's reviews moved around each recent update — "did the last patch hurt it?".
+
+    Lines up the developer's update and patch-note posts from the last `days`
+    days with Steam's exact review counts for the `window_days` before and after
+    each one, and reports the change in positive %. A change is only given when
+    both sides have enough reviews. Correlation, not proof: sales, events and
+    review bombs move scores too. No API key required.
+
+    Args:
+        params (UpdateImpactInput): appid, days, window_days, language,
+            purchase_type, country_code.
+
+    Returns:
+        str: Markdown or JSON: each update (date, title, url) with before/after
+        review counts, positive % and score, and change_pts, newest first.
+    """
+    try:
+        cc = params.country_code
+        now = time.time()
+        window = params.window_days * 86400
+        news, info, purchase = await asyncio.gather(
+            _steam_get(
+                "ISteamNews/GetNewsForApp/v2/",
+                {"appid": params.appid, "count": 100, "maxlength": 1,
+                 "feeds": "steam_community_announcements"},
+                with_key=False,
+                cache_ttl=CACHE_TTL_NEWS,
+            ),
+            _app_price(params.appid, cc),
+            _resolve_purchase_type(params.purchase_type, params.appid, cc),
+        )
+        since = now - params.days * 86400
+        updates = sorted(
+            (it for it in (news.get("appnews") or {}).get("newsitems", [])
+             if (it.get("date") or 0) >= since and _is_update_post(it)),
+            key=lambda it: it.get("date") or 0, reverse=True,
+        )[:UPDATE_MAX_EVENTS]
+
+        def side(start: float, end: float):
+            return _review_window(params.appid, start, end, language=params.language,
+                                  purchase_type=purchase, cc=cc)
+
+        windows = await _gather_limited(
+            [side(it["date"] - window, it["date"]) for it in updates]
+            + [side(it["date"], it["date"] + window) for it in updates])
+        events = []
+        for i, it in enumerate(updates):
+            d = it["date"]
+            before_raw, after_raw = windows[i], windows[len(updates) + i]
+            before = _window_block(before_raw["query_summary"]) if before_raw else None
+            after = _window_block(after_raw["query_summary"]) if after_raw else None
+            enough = (before and after
+                      and min(before["reviews"], after["reviews"]) >= UPDATE_MIN_REVIEWS)
+            later = updates[i - 1]["date"] if i else None   # newest first
+            events.append({
+                "date": _ts_to_date(d), "title": it.get("title"), "url": it.get("url"),
+                "before": before, "after": after,
+                "change_pts": (round(after["positive_pct"] - before["positive_pct"], 1)
+                               if enough else None),
+                "after_window_complete": d + window <= now,
+                "next_update_within_window": bool(later and later - d < window),
+            })
+        out = {
+            "appid": params.appid, "name": info.get("name") or str(params.appid),
+            "scope": {"days": params.days, "window_days": params.window_days,
+                      "language": params.language, "purchase_type": purchase},
+            "updates": events,
+        }
+        if params.response_format == ResponseFormat.JSON:
+            return _dump(out)
+        return _impact_markdown(out)
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
+
+
+def _impact_markdown(out: dict) -> str:
+    sc = out["scope"]
+    who = "Steam purchases" if sc["purchase_type"] == "steam" else "all reviewers"
+    lines = [f"# Update impact: {out['name']} (appid {out['appid']})",
+             f"*Reviews {sc['window_days']} days before vs after each update in the "
+             f"last {sc['days']} days; {sc['language']} reviews, {who}.*", ""]
+    if not out["updates"]:
+        lines.append(f"No update or patch-note posts in the last {sc['days']} days.")
+        return "\n".join(lines)
+    for e in out["updates"]:
+        b, a = e["before"], e["after"]
+        if b is None or a is None:
+            result = "Steam didn't return the review counts; try again shortly"
+        elif e["change_pts"] is None:
+            result = (f"too few reviews to compare ({b['reviews']:,} before, "
+                      f"{a['reviews']:,} after)")
+        else:
+            sign = "+" if e["change_pts"] >= 0 else ""
+            result = (f"{b['positive_pct']}% → {a['positive_pct']}% "
+                      f"(**{sign}{e['change_pts']} pts**; {b['reviews']:,} → "
+                      f"{a['reviews']:,} reviews)")
+        notes = []
+        if not e["after_window_complete"]:
+            notes.append("after-window still open")
+        if e["next_update_within_window"]:
+            notes.append("another update followed within the window")
+        note = f" — {'; '.join(notes)}" if notes else ""
+        lines.append(f"- {e['date']} **{e['title']}**: {result}{note}")
     return "\n".join(lines)
 
 
@@ -5340,11 +5806,10 @@ async def steam_should_i_buy(params: ShouldIBuyInput) -> str:
         summ = rev.get("query_summary", {}) if isinstance(rev, dict) else {}
         l_pos, l_neg = summ.get("total_positive", 0), summ.get("total_negative", 0)
         l_pct = round(100 * l_pos / (l_pos + l_neg), 1) if (l_pos + l_neg) else None
-        window, capped = await _collect_recent_reviews(
-            params.appid, 30, cc, purchase_type=purchase
-        )
-        r_n = len(window)
-        r_pct = round(100 * sum(1 for r in window if r.get("voted_up")) / r_n, 1) if r_n else None
+        rc, _ = await _recent_reviews(params.appid, 30, cc, language="english",
+                                      purchase_type=purchase)
+        r_n, capped = rc["reviews_counted"], rc["sampled"]
+        r_pct = rc["positive_pct"] if r_n else None
         trend = round(r_pct - l_pct, 1) if (r_pct is not None and l_pct is not None) else None
 
         name_map = await _tag_name_map()

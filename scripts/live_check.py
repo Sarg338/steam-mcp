@@ -177,17 +177,17 @@ async def check_app(client: httpx2.AsyncClient, appid: int, rep: Report):
                   ok=_near(s.get("total_reviews"), n))
         rep.check(tag, "lifetime reviews (%)", s.get("positive_pct"), pct,
                   ok=abs((s.get("positive_pct") or 0) - pct) <= PCT_TOLERANCE)
-    if "recent" in page and page["recent"][1] <= 10_000:
+    if "recent" in page:
+        # The store's recent row covers every language (its lifetime row doesn't).
         pct, n = page["recent"]
         rc = json.loads(await S.steam_get_app_reviews(S.AppReviewsInput(
             appid=appid, limit=0, review_filter="recent", language="all",
-            recent_max_reviews=10_000, response_format="json")))["recent"]
+            response_format="json")))["recent"]
         rep.check(tag, "30-day reviews (count)", rc["reviews_counted"], n,
                   ok=_near(rc["reviews_counted"], n, 0.02))
         rep.check(tag, "30-day reviews (%)", rc["positive_pct"], pct,
                   ok=abs(rc["positive_pct"] - pct) <= PCT_TOLERANCE)
-    elif "recent" in page:
-        rep.skip("30-day reviews", f"{page['recent'][1]:,} is over the 10k cap")
+        rep.check(tag, "30-day reviews exact, not sampled", rc["sampled"], False)
 
     gb = await client.get(f"https://store.steampowered.com/app/{appid}/",
                           params={"l": "english", "cc": "gb"})
