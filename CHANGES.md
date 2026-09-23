@@ -5,6 +5,10 @@ A concise, one-line-per-change history. Versions follow
 <https://github.com/Sarg338/steam-mcp/releases>
 
 ## [Unreleased]
+<!-- release: minor -->
+- **Fixed: review scores counted key activations the store page leaves out.** For a paid game, Steam's store page scores only reviews from Steam purchases; we counted every review, so Black Myth: Wukong read 87,240 English reviews where the store shows 71,180, and Cyberpunk 2077 read 418,518 against 391,196. `steam_get_app_reviews` and `steam_should_i_buy` now count what the store counts: Steam purchases for a paid game, everyone for a free one (Dota 2, CS2). Verified live: Black Myth 71,149 / 93.9% and Cyberpunk 390,974 / 89.2%, matching the store. A new `purchase_type` parameter (`store` by default, or `steam` / `all`) forces either population, and the JSON summary reports which one was counted.
+- **New: `recent_max_reviews` on `steam_get_app_reviews`.** The recent tally stopped at 600 reviews, so any popular game came back `sampled`. It can now go up to 10,000; Cyberpunk's all-language 30-day score reads 94.6% of 7,010 against the store's 94% of 7,042.
+- **Smaller tool definitions:** optional parameters no longer publish `"default": null` in their schemas, about 100 tokens off every request.
 - **Fixed: a game's achievement count read as 0 for non-English callers.** Steam returns `achievements.total` as 0 on every non-English `appdetails` request — verified live across CS2, TF2, Elden Ring and Stardew Valley, all of which report 0 in German and French while English reports 1 / 520 / 42 / 49 — so `achievements_total` was wrong and the markdown **Achievements** line disappeared entirely. It also switched `has_achievements` off for a game that has achievements without carrying the "Steam Achievements" category, which is the only other signal (CS2 is such a game). The count now comes from the same cached English lookup the feature flags use; an English caller's genuine 0 is left alone.
 
 ## [1.16.1]

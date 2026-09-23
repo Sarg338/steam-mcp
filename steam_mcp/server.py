@@ -1314,6 +1314,19 @@ class AppReviewsInput(BaseModel):
         "(e.g. 'english', 'french') or 'all' for every language. Default 'english'.",
         min_length=2, max_length=32,
     )
+    purchase_type: str = Field(
+        default="store",
+        description="Whose reviews count: 'store' (default) matches the store page "
+        "(Steam purchases only for a paid game, excluding key activations; "
+        "everyone for a free game); 'steam' or 'all' to force either.",
+    )
+    recent_max_reviews: int = Field(
+        default=MAX_RECENT_PAGES * RECENT_PAGE_SIZE,
+        description="Most reviews to tally for review_filter='recent' (100-10000). "
+        "Raise it for busy games so the recent score isn't 'sampled'.",
+        ge=100,
+        le=10_000,
+    )
     response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
 
     @field_validator("review_type")
@@ -1322,6 +1335,14 @@ class AppReviewsInput(BaseModel):
         v = v.lower().strip()
         if v not in {"all", "positive", "negative"}:
             raise ValueError("review_type must be 'all', 'positive', or 'negative'")
+        return v
+
+    @field_validator("purchase_type")
+    @classmethod
+    def _check_purchase(cls, v: str) -> str:
+        v = v.lower().strip()
+        if v not in {"store", "steam", "all"}:
+            raise ValueError("purchase_type must be 'store', 'steam', or 'all'")
         return v
 
     @field_validator("review_filter")
@@ -3384,15 +3405,38 @@ def _fmt_review(r: dict) -> dict:
     }
 
 
+def _store_purchase_type(is_free: bool | None) -> str:
+    """The review population the store page scores a game on.
+
+    Verified live against the store page (2026-09): a paid game's score counts
+    Steam purchases only, leaving out key activations, while a free game's
+    counts everyone (nobody buys it on Steam, so 'steam' shrinks Dota 2 from
+    ~840k English reviews to ~6k). Unknown -> 'all', the pre-1.17 behavior.
+    """
+    if is_free is None or is_free:
+        return "all"
+    return "steam"
+
+
+async def _resolve_purchase_type(choice: str, appid: int, cc: str) -> str:
+    """Map a caller's purchase_type ('store'|'steam'|'all') to Steam's value."""
+    if choice != "store":
+        return choice
+    info = await _app_price(appid, cc)  # cached appdetails; never raises
+    return _store_purchase_type(info.get("is_free") if info.get("name") else None)
+
+
 async def _collect_recent_reviews(
-    appid: int, day_range: int, cc: str, language: str = "english"
+    appid: int, day_range: int, cc: str, language: str = "english",
+    purchase_type: str = "all", max_reviews: int | None = None,
 ) -> tuple[list[dict], bool]:
     """Paginate the newest reviews (filter=recent) within the last `day_range` days.
 
     Steam's query_summary is always lifetime, so the recent score must be tallied
     from individual reviews. Returns (reviews_in_window, capped) where `capped` is
     True whenever the window may hold more reviews than were counted: the page
-    budget ran out before the window's edge, or a page failed part-way.
+    budget (`max_reviews`, default ~600) ran out before the window's edge, or a
+    page failed part-way.
 
     A failed page never raises: callers already hold the lifetime summary, and
     losing that to one timed-out page of the recent tally is the worse outcome.
@@ -3404,7 +3448,8 @@ async def _collect_recent_reviews(
     cursor = "*"
     seen: set[str] = set()
     seen_ids: set = set()
-    for _ in range(MAX_RECENT_PAGES):
+    budget = max_reviews or MAX_RECENT_PAGES * RECENT_PAGE_SIZE
+    for _ in range(-(-budget // RECENT_PAGE_SIZE)):
         try:
             data = await _raw_get(
                 f"https://store.steampowered.com/appreviews/{appid}",
@@ -3413,7 +3458,7 @@ async def _collect_recent_reviews(
                     "filter": "recent",
                     "language": language,
                     "review_type": "all",
-                    "purchase_type": "all",
+                    "purchase_type": purchase_type,
                     "num_per_page": RECENT_PAGE_SIZE,
                     "cc": cc,
                     "cursor": cursor,
@@ -3460,22 +3505,29 @@ async def steam_get_app_reviews(params: AppReviewsInput) -> str:
     With review_filter='recent', it ALSO computes the last-N-days positive % by
     tallying the newest reviews — Steam's API has no recent-summary field, so this
     is derived from individual reviews and is marked 'sampled' if the game has more
-    recent reviews than the page budget (~600). No API key required.
+    recent reviews than `recent_max_reviews` (default 600). By default both scores
+    count the population the store page does: Steam purchases only for a paid
+    game (key activations excluded), everyone for a free one. No API key required.
 
     Args:
         params (AppReviewsInput): appid, review_filter ('all'|'recent'),
             day_range (window for 'recent'), review_type (excerpt sampling),
-            limit (number of excerpts), country_code.
+            limit (number of excerpts), country_code, language, purchase_type
+            ('store'|'steam'|'all'), recent_max_reviews.
 
     Returns:
         str: Markdown or JSON. Always includes the lifetime summary
-        (review_score_desc, total_positive/negative/reviews, positive_pct). When
+        (review_score_desc, total_positive/negative/reviews, positive_pct,
+        purchase_type — the population actually counted). When
         review_filter='recent', adds a 'recent' block (day_range, reviews_counted,
         positive, negative, positive_pct, sampled) and samples excerpts from the
         recent window; otherwise samples from the most-helpful lifetime reviews.
     """
     try:
         url = f"https://store.steampowered.com/appreviews/{params.appid}"
+        purchase = await _resolve_purchase_type(
+            params.purchase_type, params.appid, params.country_code
+        )
 
         def _query(review_type: str, num_per_page: int) -> dict:
             return {
@@ -3483,7 +3535,7 @@ async def steam_get_app_reviews(params: AppReviewsInput) -> str:
                 "filter": "all",
                 "language": params.language,
                 "review_type": review_type,
-                "purchase_type": "all",
+                "purchase_type": purchase,
                 "num_per_page": num_per_page,
                 "cc": params.country_code,
             }
@@ -3510,7 +3562,8 @@ async def steam_get_app_reviews(params: AppReviewsInput) -> str:
         recent = None
         if params.review_filter == "recent":
             window, capped = await _collect_recent_reviews(
-                params.appid, params.day_range, params.country_code, params.language
+                params.appid, params.day_range, params.country_code, params.language,
+                purchase, params.recent_max_reviews,
             )
             rpos = sum(1 for r in window if r.get("voted_up"))
             rneg = len(window) - rpos
@@ -3552,6 +3605,7 @@ async def steam_get_app_reviews(params: AppReviewsInput) -> str:
                     "total_positive": pos,
                     "total_negative": neg,
                     "positive_pct": pos_pct,
+                    "purchase_type": purchase,
                 },
                 "reviews": reviews,
             }
@@ -3559,6 +3613,8 @@ async def steam_get_app_reviews(params: AppReviewsInput) -> str:
                 out["recent"] = recent
             return _dump(out)
 
+        who = ("Steam purchases; key activations excluded" if purchase == "steam"
+               else "all reviewers, key activations included")
         lines = [
             f"# Reviews for app {params.appid}",
             f"- **Overall (all-time)**: {summ.get('review_score_desc', 'n/a')} — "
@@ -3572,12 +3628,14 @@ async def steam_get_app_reviews(params: AppReviewsInput) -> str:
                 f"Steam didn't return the recent reviews; try again shortly"
             )
         elif recent is not None:
-            note = " (sampled — capped)" if recent["sampled"] else ""
+            note = (" (sampled — capped; raise recent_max_reviews)"
+                    if recent["sampled"] else "")
             lines.append(
                 f"- **Recent (last {recent['day_range']}d)**: "
                 f"{recent['positive_pct']}% of {recent['reviews_counted']} "
                 f"reviews{note}"
             )
+        lines.append(f"- *Counted: {params.language} reviews, {who}.*")
         lines.append("")
         if reviews:
             scope = "recent" if params.review_filter == "recent" else params.review_type
@@ -4783,14 +4841,23 @@ async def steam_should_i_buy(params: ShouldIBuyInput) -> str:
     """
     try:
         cc = params.country_code
-        details, rev, tags_map = await asyncio.gather(
+
+        def _summary(purchase_type: str):
+            return _raw_get(
+                f"https://store.steampowered.com/appreviews/{params.appid}",
+                {"json": 1, "filter": "all", "language": "english",
+                 "review_type": "all", "purchase_type": purchase_type,
+                 "num_per_page": 0, "cc": cc},
+                cache_ttl=CACHE_TTL_REVIEWS,
+            )
+
+        # Whether the store page counts key activations depends on is_free, which
+        # arrives with appdetails — fetch both populations alongside it rather
+        # than adding a sequential round trip.
+        details, rev_steam, rev_all, tags_map = await asyncio.gather(
             _store_get("appdetails", {"appids": params.appid, "cc": cc, "l": "english"},
                        cache_ttl=CACHE_TTL_APPDETAILS),
-            _raw_get(f"https://store.steampowered.com/appreviews/{params.appid}",
-                     {"json": 1, "filter": "all", "language": "english",
-                      "review_type": "all", "purchase_type": "all",
-                      "num_per_page": 0, "cc": cc},
-                     cache_ttl=CACHE_TTL_REVIEWS),
+            _summary("steam"), _summary("all"),
             _items_tags([params.appid]),
         )
         entry = details.get(str(params.appid), {}) if isinstance(details, dict) else {}
@@ -4801,11 +4868,15 @@ async def steam_should_i_buy(params: ShouldIBuyInput) -> str:
         price = d.get("price_overview") or {}
         is_free = d.get("is_free", False)
         rel = d.get("release_date") or {}
+        purchase = _store_purchase_type(bool(is_free))
+        rev = rev_steam if purchase == "steam" else rev_all
 
         summ = rev.get("query_summary", {}) if isinstance(rev, dict) else {}
         l_pos, l_neg = summ.get("total_positive", 0), summ.get("total_negative", 0)
         l_pct = round(100 * l_pos / (l_pos + l_neg), 1) if (l_pos + l_neg) else None
-        window, capped = await _collect_recent_reviews(params.appid, 30, cc)
+        window, capped = await _collect_recent_reviews(
+            params.appid, 30, cc, purchase_type=purchase
+        )
         r_n = len(window)
         r_pct = round(100 * sum(1 for r in window if r.get("voted_up")) / r_n, 1) if r_n else None
         trend = round(r_pct - l_pct, 1) if (r_pct is not None and l_pct is not None) else None
@@ -4843,7 +4914,8 @@ async def steam_should_i_buy(params: ShouldIBuyInput) -> str:
             "metacritic": (d.get("metacritic") or {}).get("score"),
             "review_lifetime": {"desc": summ.get("review_score_desc"),
                                 "positive_pct": l_pct,
-                                "total": summ.get("total_reviews", 0)},
+                                "total": summ.get("total_reviews", 0),
+                                "purchase_type": purchase},
             "review_recent_30d": {"positive_pct": r_pct, "reviews_counted": r_n,
                                   "sampled": capped},
             "review_trend_pts": trend,
@@ -6150,6 +6222,28 @@ def _strip_schema_titles(node: Any) -> None:
             _strip_schema_titles(item)
 
 
+def _strip_null_defaults(node: Any) -> None:
+    """Drop `"default": null` from every property schema.
+
+    Pydantic emits it for each optional field; an absent default already means
+    "may be omitted", so it tells the model nothing. Only property schemas are
+    touched, and only a default that is literally null.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in _SCHEMA_NAME_MAPS and isinstance(value, dict):
+                for sub in value.values():
+                    if isinstance(sub, dict) and "default" in sub \
+                            and sub["default"] is None:
+                        del sub["default"]
+                    _strip_null_defaults(sub)
+            elif key not in _SCHEMA_DATA_KEYS:
+                _strip_null_defaults(value)
+    elif isinstance(node, list):
+        for item in node:
+            _strip_null_defaults(item)
+
+
 def _lean_schemas() -> None:
     """Trim redundancy out of each tool's *wire* input schema.
 
@@ -6173,6 +6267,7 @@ def _lean_schemas() -> None:
         try:
             _inline_enum_defs(schema)
             _strip_schema_titles(schema)
+            _strip_null_defaults(schema)
         except Exception:  # noqa: BLE001
             continue
 
