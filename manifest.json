@@ -166,6 +166,10 @@
       "description": "Review score and samples, lifetime or last-N-days"
     },
     {
+      "name": "steam_analyze_app_reviews",
+      "description": "Analyze thousands of reviews: trend, languages, playtime, Deck, keys vs Steam purchases"
+    },
+    {
       "name": "steam_get_featured_specials",
       "description": "Games currently on sale (regional)"
     },
@@ -214,7 +218,7 @@
     "steam_api_key": {
       "type": "string",
       "title": "Steam Web API Key (optional)",
-      "description": "Optional. 15 of the 37 tools \u2014 store, games, reviews, prices, deals, player counts, Steam Deck, achievement rarity \u2014 work with no key at all. Add a key (32 hex characters, free at https://steamcommunity.com/dev/apikey) to unlock the tools that read a specific account: library, playtime, friends, achievements, wishlist, inventory.",
+      "description": "Optional. 16 of the 38 tools \u2014 store, games, reviews, prices, deals, player counts, Steam Deck, achievement rarity \u2014 work with no key at all. Add a key (32 hex characters, free at https://steamcommunity.com/dev/apikey) to unlock the tools that read a specific account: library, playtime, friends, achievements, wishlist, inventory.",
       "sensitive": true,
       "required": false,
       "default": ""

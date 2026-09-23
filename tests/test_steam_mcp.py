@@ -2174,7 +2174,7 @@ def test_friends_who_own(monkeypatch):
 
 def test_server_registers_its_surface():
     """The server object builds on whichever SDK major is installed."""
-    assert len(S.mcp._tool_manager.list_tools()) == 37
+    assert len(S.mcp._tool_manager.list_tools()) == 38
     assert len(S.mcp._prompt_manager.list_prompts()) == 5
 
 
@@ -2575,7 +2575,7 @@ def test_readme_key_column_matches_the_code():
         encoding="utf-8"
     )
     rows = re.findall(r"^\| `(steam_\w+)` \|.*\| (no\*|no|yes†|yes) \|$", readme, re.M)
-    assert len(rows) == 37, f"parsed {len(rows)} tool rows, expected 37"
+    assert len(rows) == 38, f"parsed {len(rows)} tool rows, expected 38"
     for name, marker in rows:
         if marker == "no":
             assert name in S.KEYLESS_TOOLS, f"{name} documented keyless, is not"
@@ -3168,3 +3168,178 @@ def test_wire_schemas_drop_null_defaults():
     S._strip_null_defaults(node)
     assert node == {"properties": {"a": {"type": "string"},
                                    "b": {"default": 0, "type": "integer"}}}
+
+
+# --------------------------------------------------------------------------- #
+# steam_analyze_app_reviews: streaming aggregates over the review corpus
+# --------------------------------------------------------------------------- #
+
+def _corpus_review(rid, ts, up=True, **extra):
+    r = {"recommendationid": rid, "timestamp_created": ts, "voted_up": up,
+         "votes_up": 0, "language": "english", "review": "fine game",
+         "steam_purchase": True, "received_for_free": False,
+         "author": {"playtime_forever": 600, "playtime_at_review": 120}}
+    r.update(extra)
+    return r
+
+
+def _corpus_fakes(monkeypatch, pages, fail_at=None):
+    """Serve `pages` (cursor -> page) and record each request's params."""
+    calls = []
+
+    async def fake_raw(url, params, cache_ttl=0):
+        calls.append(dict(params))
+        if fail_at is not None and len(calls) == fail_at:
+            raise S.httpx.TimeoutException("slow")
+        return pages[params["cursor"]]
+
+    async def fake_price(appid, cc):
+        return {"appid": appid, "name": "G", "is_free": False}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(S, "_app_price", fake_price)
+    return calls
+
+
+def _analyze(**kw):
+    kw.setdefault("response_format", "json")
+    return json.loads(run(S.steam_analyze_app_reviews(
+        S.ReviewAnalysisInput(appid=1, **kw))))
+
+
+def test_analyze_reviews_aggregates_segments_and_dedupes_across_pages(monkeypatch):
+    now = int(time.time())
+    summary = {"review_score_desc": "Very Positive", "total_reviews": 1000,
+               "total_positive": 900, "total_negative": 100}
+    pages = {
+        "*": {"success": 1, "cursor": "c1", "query_summary": summary, "reviews": [
+            _corpus_review("1", now - 10, votes_up=50),
+            _corpus_review("2", now - 20, up=False, steam_purchase=False,
+                           language="koreana", review="별로예요",
+                           author={"playtime_at_review": 30}),
+            _corpus_review("3", now - 30, primarily_steam_deck=True,
+                           developer_response="Thanks!", refunded=True),
+        ]},
+        "c1": {"success": 1, "cursor": "c2", "reviews": [
+            _corpus_review("3", now - 30),                # overlap: counted once
+            _corpus_review("4", now - 40, up=False, received_for_free=True,
+                           steam_purchase=False, written_during_early_access=True,
+                           votes_up=7),
+        ]},
+        "c2": {"success": 1, "cursor": "c2", "reviews": []},
+    }
+    calls = _corpus_fakes(monkeypatch, pages)
+    d = _analyze(samples=1)
+    sc = d["scanned"]
+    assert (sc["reviews"], sc["positive"], sc["negative"]) == (4, 2, 2)
+    assert sc["complete"] and sc["stop_reason"] == "exhausted"
+    assert sc["next_cursor"] is None
+    assert d["lifetime"]["positive_pct"] == 90.0
+    assert d["scope"]["purchase_type"] == "all"          # default: compare sources
+    seg = d["segments"]
+    assert seg["steam_purchase"]["reviews"] == 2
+    assert seg["key_activation"] == {"reviews": 1, "share_pct": 25.0,
+                                     "positive_pct": 0.0}
+    assert seg["received_for_free"]["reviews"] == 1
+    assert seg["early_access"]["reviews"] == 1
+    assert seg["steam_deck"]["reviews"] == 1
+    assert seg["developer_response"]["reviews"] == 1
+    assert seg["refunded"]["reviews"] == 1
+    langs = {g["language"]: g["reviews"] for g in d["languages"]}
+    assert langs == {"english": 3, "koreana": 1}
+    buckets = {b["bucket"]: b["reviews"] for b in d["playtime_at_review"]["buckets"]}
+    assert buckets == {"<1h": 1, "1-5h": 3}
+    s = d["samples"]
+    assert [r["votes_up"] for r in s["most_helpful_positive"]] == [50]
+    assert [r["votes_up"] for r in s["most_helpful_negative"]] == [7]
+    assert s["newest_negative"][0]["excerpt"] == "별로예요"   # Hangul survives
+    assert [c["filter"] for c in calls] == ["recent"] * 3
+
+
+def test_analyze_reviews_stops_at_max_reviews_with_a_resume_cursor(monkeypatch):
+    now = int(time.time())
+    pages = {c: {"success": 1, "cursor": f"n{i}",
+                 "reviews": [_corpus_review(f"{i}-{j}", now - i * 100 - j)
+                             for j in range(100)]}
+             for i, c in enumerate(["*", "n0", "n1", "n2"])}
+    calls = _corpus_fakes(monkeypatch, pages)
+    d = _analyze(max_reviews=200, samples=0)
+    assert d["scanned"]["reviews"] == 200
+    assert d["scanned"]["stop_reason"] == "max_reviews"
+    assert not d["scanned"]["complete"]
+    assert d["scanned"]["next_cursor"] == "n1"          # the next unread page
+    assert [c["num_per_page"] for c in calls] == [100, 100]
+    calls.clear()
+    resumed = _analyze(max_reviews=100, samples=0, cursor="n1")
+    assert resumed["lifetime"] is None                  # only the first page has it
+    assert calls[0]["cursor"] == "n1"
+
+
+def test_analyze_reviews_stops_at_the_window_edge(monkeypatch):
+    now = int(time.time())
+    pages = {"*": {"success": 1, "cursor": "c1", "reviews": [
+        _corpus_review("1", now - 86400),
+        _corpus_review("2", now - 2 * 86400),
+        _corpus_review("3", now - 9 * 86400),              # outside 7 days
+    ]}}
+    calls = _corpus_fakes(monkeypatch, pages)
+    d = _analyze(day_range=7)
+    assert d["scanned"]["reviews"] == 2
+    assert d["scanned"]["complete"] and d["scanned"]["stop_reason"] == "window_edge"
+    assert len(calls) == 1
+
+
+def test_analyze_reviews_keeps_the_tally_when_a_page_fails(monkeypatch):
+    now = int(time.time())
+    pages = {"*": {"success": 1, "cursor": "c1",
+                   "reviews": [_corpus_review("1", now - 5)]}}
+    _corpus_fakes(monkeypatch, pages, fail_at=2)
+    d = _analyze()
+    assert d["scanned"]["reviews"] == 1
+    assert d["scanned"]["stop_reason"] == "request_error"
+    assert d["scanned"]["next_cursor"] == "c1" and d["scanned"]["error"]
+
+
+def test_analyze_reviews_markdown_flags_a_partial_scan(monkeypatch):
+    now = int(time.time())
+    pages = {"*": {"success": 1, "cursor": "c1",
+                   "reviews": [_corpus_review("1", now - 5)]}}
+    _corpus_fakes(monkeypatch, pages, fail_at=2)
+    md = run(S.steam_analyze_app_reviews(S.ReviewAnalysisInput(appid=1)))
+    assert "Partial" in md and "cursor=`c1`" in md
+    assert "Bought on Steam: 1 (100.0%)" in md
+
+
+def test_analyze_reviews_store_population_and_validation(monkeypatch):
+    calls = _corpus_fakes(monkeypatch, {"*": {"success": 1, "reviews": []}})
+    d = _analyze(purchase_type="store")
+    assert d["scope"]["purchase_type"] == "steam"        # paid game in the fake
+    assert calls[0]["purchase_type"] == "steam"
+    assert d["scanned"]["reviews"] == 0 and d["scanned"]["positive_pct"] is None
+    for bad in ({"max_reviews": 50}, {"max_reviews": 20_001}, {"samples": 6},
+                {"purchase_type": "keys"}, {"day_range": 0}):
+        with pytest.raises(ValueError):
+            S.ReviewAnalysisInput(appid=1, **bad)
+
+
+def test_review_timeline_rolls_up_by_span():
+    from collections import Counter
+    days = Counter({"2026-01-01": 2, "2026-01-02": 1})
+    pos = Counter({"2026-01-01": 1})
+    tl = S._review_timeline(days, pos)
+    assert tl["granularity"] == "day"
+    assert tl["periods"][0] == {"period": "2026-01-01", "reviews": 2,
+                                "positive_pct": 50.0}
+    tl = S._review_timeline(Counter({"2025-01-01": 1, "2025-06-01": 1}), Counter())
+    assert tl["granularity"] == "week"
+    tl = S._review_timeline(Counter({"2020-01-15": 1, "2026-01-15": 3}),
+                            Counter({"2026-01-15": 3}))
+    assert tl["granularity"] == "month"
+    assert tl["periods"] == [
+        {"period": "2020-01", "reviews": 1, "positive_pct": 0.0},
+        {"period": "2026-01", "reviews": 3, "positive_pct": 100.0}]
+    many = Counter({f"{y}-{m:02d}-01": 1 for y in range(2010, 2026)
+                    for m in range(1, 13)})
+    tl = S._review_timeline(many, Counter())
+    assert len(tl["periods"]) == S.REVIEW_TIMELINE_CAP and tl["truncated"]
+    assert S._review_timeline(Counter(), Counter())["periods"] == []

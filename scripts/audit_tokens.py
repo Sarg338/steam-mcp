@@ -227,6 +227,34 @@ def _scenarios() -> list:
             res = {f: _run_tool(fn, make(f)) for f in ("markdown", "json")}
         out.append((label, res))
 
+    # 9. analyze_app_reviews at samples=5: every group full of max-length CJK
+    # excerpts, 15+ languages and a timeline long enough to hit its cap.
+    long_review = "這款遊戲的戰鬥系統非常出色，" * 40  # well past the excerpt cap
+    langs = [f"language_{i:02d}" for i in range(20)]
+    corpus = [{"recommendationid": str(i), "voted_up": i % 3 != 0,
+               "votes_up": i, "language": langs[i % len(langs)],
+               "timestamp_created": 1_300_000_000 + i * 30 * 86400,
+               "review": long_review, "steam_purchase": i % 2 == 0,
+               "received_for_free": False, "written_during_early_access": i % 5 == 0,
+               "primarily_steam_deck": i % 7 == 0, "refunded": i % 11 == 0,
+               "developer_response": "Thanks!" if i % 13 == 0 else "",
+               "author": {"playtime_forever": i * 60, "playtime_at_review": i * 45}}
+              for i in range(200)][::-1]
+
+    async def fake_reviews(url, params, cache_ttl=0):
+        return {"success": 1, "cursor": "end", "reviews": corpus,
+                "query_summary": {"review_score_desc": "Very Positive",
+                                  "total_reviews": 200, "total_positive": 133}}
+
+    async def fake_price(appid, cc):
+        return {"appid": appid, "name": "Example", "is_free": False}
+
+    with _patch(_raw_get=fake_reviews, _app_price=fake_price):
+        res = {f: _run_tool(S.steam_analyze_app_reviews, S.ReviewAnalysisInput(
+            appid=1, max_reviews=200, samples=5, response_format=f))
+            for f in ("markdown", "json")}
+    out.append(("steam_analyze_app_reviews (samples=5)", res))
+
     return out
 
 
