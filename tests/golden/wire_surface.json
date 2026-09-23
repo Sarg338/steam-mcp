@@ -169,6 +169,55 @@
     {
       "annotations": {
         "readOnlyHint": true,
+        "title": "Analyze a Steam Game (One-Call Brief)"
+      },
+      "description": "One-call brief on a game — price, all-time and 30-day reviews, players now, Deck, tags, latest update's effect, and news.",
+      "inputSchema": {
+        "$defs": {
+          "AnalyzeGameInput": {
+            "additionalProperties": false,
+            "properties": {
+              "appid": {
+                "description": "Steam application (game) ID.",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "country_code": {
+                "default": "us",
+                "maxLength": 2,
+                "minLength": 2,
+                "type": "string"
+              },
+              "response_format": {
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "appid"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "params": {
+            "$ref": "#/$defs/AnalyzeGameInput"
+          }
+        },
+        "required": [
+          "params"
+        ],
+        "type": "object"
+      },
+      "name": "steam_analyze_game"
+    },
+    {
+      "annotations": {
+        "readOnlyHint": true,
         "title": "Analyze Steam Library / Backlog"
       },
       "description": "Analyze a whole game library: backlog, playtime distribution, abandoned games.",

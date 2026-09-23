@@ -44,7 +44,8 @@
       ],
       "env": {
         "STEAM_API_KEY": "${user_config.steam_api_key}",
-        "STEAM_USER": "${user_config.steam_user}"
+        "STEAM_USER": "${user_config.steam_user}",
+        "STEAM_MCP_TOOLS": "${user_config.tool_set}"
       }
     }
   },
@@ -166,6 +167,10 @@
       "description": "Review score and samples, lifetime or last-N-days"
     },
     {
+      "name": "steam_analyze_game",
+      "description": "One-call brief: price, reviews, players, Deck, tags, latest update, news"
+    },
+    {
       "name": "steam_compare_games",
       "description": "Compare 2-5 games side by side: price, reviews, players, Deck, co-op"
     },
@@ -226,7 +231,7 @@
     "steam_api_key": {
       "type": "string",
       "title": "Steam Web API Key (optional)",
-      "description": "Optional. 18 of the 40 tools \u2014 store, games, reviews, prices, deals, player counts, Steam Deck, achievement rarity \u2014 work with no key at all. Add a key (32 hex characters, free at https://steamcommunity.com/dev/apikey) to unlock the tools that read a specific account: library, playtime, friends, achievements, wishlist, inventory.",
+      "description": "Optional. 19 of the 41 tools \u2014 store, games, reviews, prices, deals, player counts, Steam Deck, achievement rarity \u2014 work with no key at all. Add a key (32 hex characters, free at https://steamcommunity.com/dev/apikey) to unlock the tools that read a specific account: library, playtime, friends, achievements, wishlist, inventory.",
       "sensitive": true,
       "required": false,
       "default": ""
@@ -238,6 +243,14 @@
       "sensitive": false,
       "required": false,
       "default": ""
+    },
+    "tool_set": {
+      "type": "string",
+      "title": "Tool set (optional)",
+      "description": "'all' (default) loads all 41 tools. 'essentials' loads the 15 most useful and saves context on every message. You can also add tools by name, e.g. 'essentials,get_inventory'.",
+      "sensitive": false,
+      "required": false,
+      "default": "all"
     }
   }
 }

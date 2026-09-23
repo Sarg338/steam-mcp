@@ -21,12 +21,17 @@
       "environmentVariables": [
         {
           "name": "STEAM_API_KEY",
-          "description": "Steam Web API key (optional, free at https://steamcommunity.com/dev/apikey). 18 tools work without it — store, games, reviews, prices, deals, player counts, achievement rarity. A key adds the account tools: library, playtime, friends, achievements, wishlist, inventory.",
+          "description": "Steam Web API key (optional, free at https://steamcommunity.com/dev/apikey). 19 tools work without it — store, games, reviews, prices, deals, player counts, achievement rarity. A key adds the account tools: library, playtime, friends, achievements, wishlist, inventory.",
           "isSecret": true
         },
         {
           "name": "STEAM_USER",
           "description": "Optional. Your own Steam vanity name, SteamID64, or profile URL, so the account tools default to you when you omit a steamid. Public profile name, not a secret.",
+          "isRequired": false
+        },
+        {
+          "name": "STEAM_MCP_TOOLS",
+          "description": "Optional. Which tools to load: 'all' (default, 41 tools), 'essentials' (15 tools, a much smaller context footprint), or 'essentials,get_inventory' to add tools by name.",
           "isRequired": false
         }
       ]

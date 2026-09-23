@@ -122,7 +122,7 @@ mcp = _build_server()
 #
 # Tool annotations carry only `title` and `readOnlyHint: true`. The spec makes
 # destructiveHint and idempotentHint meaningful only when readOnlyHint is false,
-# and openWorldHint already defaults to true, so spelling them out on all 40
+# and openWorldHint already defaults to true, so spelling them out on all 41
 # tools was ~0.6k tokens of tools/list that told a client nothing.
 
 # Security: the HTTP stack logs full request URLs at INFO, and Steam requires the
@@ -391,6 +391,7 @@ def _load_key_from_dotenv() -> str:
 # so adding a tool to the wrong bucket is caught in CI rather than by a user.
 KEYLESS_TOOLS = frozenset({
     "steam_analyze_app_reviews",
+    "steam_analyze_game",
     "steam_compare_games",
     "steam_get_app_details",
     "steam_get_app_news",
@@ -623,6 +624,15 @@ else:  # v1.x SDK: no resolvers, no elicitation — keep the plain signature.
 
 _CLIENT: Optional[httpx2.AsyncClient] = None
 _CLIENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
+# A new client's first request goes out alone (see _send). httpx2 verifies TLS
+# with truststore, whose async path (wrap_bio) flips the shared SSLContext's
+# verify mode without a lock; when a fresh process opens several connections at
+# once, some get OpenSSL's own check against an empty CA store and fail with
+# CERTIFICATE_VERIFY_FAILED. Reproduced on Windows in 4-6 of 8 cold starts with
+# a parallel first burst (steam_analyze_game, steam_compare_games), 0 of 8 once
+# a single request had completed first.
+_CLIENT_WARM = False
+_WARM_LOCK: Optional[asyncio.Lock] = None
 
 
 def _http_client() -> httpx2.AsyncClient:
@@ -636,7 +646,7 @@ def _http_client() -> httpx2.AsyncClient:
     raise "RuntimeError: Event loop is closed". The long-lived MCP server uses a
     single loop, so in normal operation the client is created exactly once.
     """
-    global _CLIENT, _CLIENT_LOOP
+    global _CLIENT, _CLIENT_LOOP, _CLIENT_WARM, _WARM_LOCK
     loop = asyncio.get_running_loop()
     if _CLIENT is None or _CLIENT.is_closed or _CLIENT_LOOP is not loop:
         _CLIENT = httpx2.AsyncClient(
@@ -646,7 +656,23 @@ def _http_client() -> httpx2.AsyncClient:
             event_hooks={"request": [_enforce_host]},
         )
         _CLIENT_LOOP = loop
+        _CLIENT_WARM = False
+        _WARM_LOCK = asyncio.Lock()
     return _CLIENT
+
+
+async def _send(client, method: str, url: str, **kwargs):
+    """client.get/post, but a new shared client's first request runs alone."""
+    global _CLIENT_WARM
+    call = getattr(client, method)
+    if client is _CLIENT and not _CLIENT_WARM and _WARM_LOCK is not None:
+        async with _WARM_LOCK:
+            if not _CLIENT_WARM:
+                try:
+                    return await call(url, **kwargs)
+                finally:
+                    _CLIENT_WARM = True
+    return await call(url, **kwargs)
 
 
 def _check_host(url: str) -> None:
@@ -726,7 +752,7 @@ async def _get_with_retry(client, url: str, params: dict, timeout: float):
     for attempt in range(MAX_RETRIES + 1):
         final = attempt == MAX_RETRIES
         try:
-            resp = await client.get(url, params=params, timeout=timeout)
+            resp = await _send(client, "get", url, params=params, timeout=timeout)
         except httpx2.TimeoutException:
             if final:
                 raise
@@ -876,7 +902,8 @@ async def _steam_post(path: str, data: dict[str, Any], *, with_key: bool = False
         url = f"{API_BASE}/{path}"
         _check_host(url)
         await _rate_limit(url)
-        resp = await _http_client().post(url, data=body, timeout=HTTP_TIMEOUT)
+        resp = await _send(_http_client(), "post", url, data=body,
+                           timeout=HTTP_TIMEOUT)
         resp.raise_for_status()
         return resp.json()
 
@@ -3580,8 +3607,14 @@ async def _recent_reviews(
     One windowed request gives the exact count and score. If Steam refuses it,
     fall back to tallying the newest reviews (capped, so marked `sampled`).
     """
-    end = (time.time() // 3600 + 1) * 3600  # the hour boundary keeps it cacheable
-    win = await _review_window(appid, end - day_range * 86400, end,
+    now = time.time()
+    # The store's "last 30 days" runs from UTC midnight 30 days ago, not from
+    # this moment minus 30x24h (verified live 2026-09: exact for Black Myth,
+    # Stardew and Terraria; now-30d ran 2-4% low mid-day). The end is rounded up
+    # to the hour so the request stays cacheable.
+    start = (now // 86400 - day_range) * 86400
+    end = (now // 3600 + 1) * 3600
+    win = await _review_window(appid, start, end,
                                language=language, purchase_type=purchase_type,
                                cc=cc, num_per_page=excerpts)
     if win is not None:
@@ -4284,6 +4317,11 @@ async def _compare_row(appid: int, cc: str) -> dict:
         "steam_deck": d.get("steam_deck"),
         "metacritic": d.get("metacritic"),
         "platforms": d.get("platforms") or [],
+        "developers": d.get("developers") or [],
+        "genres": d.get("genres") or [],
+        "short_description": d.get("short_description"),
+        "achievements_total": d.get("achievements_total"),
+        "dlc_count": d.get("dlc_count"),
         "singleplayer": feats.get("is_singleplayer"),
         "multiplayer": feats.get("is_multiplayer"),
         "online_coop": feats.get("is_online_coop"),
@@ -4580,6 +4618,153 @@ def _impact_markdown(out: dict) -> str:
             notes.append("another update followed within the window")
         note = f" — {'; '.join(notes)}" if notes else ""
         lines.append(f"- {e['date']} **{e['title']}**: {result}{note}")
+    return "\n".join(lines)
+
+
+class AnalyzeGameInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    appid: int = Field(..., description="Steam application (game) ID.", ge=1)
+    country_code: str = Field(default="us", min_length=2, max_length=2)
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+
+async def _announcements(appid: int, count: int = 3) -> list[dict]:
+    """The developer's own latest posts (not the press feeds Steam mixes in).
+
+    Same request as steam_get_update_impact's, so when both run together the
+    cache shares one fetch instead of racing two.
+    """
+    try:
+        data = await _steam_get(
+            "ISteamNews/GetNewsForApp/v2/",
+            {"appid": appid, "count": 100, "maxlength": 1,
+             "feeds": "steam_community_announcements"},
+            with_key=False,
+            cache_ttl=CACHE_TTL_NEWS,
+        )
+    except Exception:  # noqa: BLE001
+        return []
+    return [{"date": _ts_to_date(it.get("date")), "title": it.get("title"),
+             "url": it.get("url")}
+            for it in (data.get("appnews") or {}).get("newsitems", [])[:count]]
+
+
+@mcp.tool(
+    name="steam_analyze_game",
+    structured_output=False,
+    annotations={
+        "title": "Analyze a Steam Game (One-Call Brief)",
+        "readOnlyHint": True,
+    },
+)
+async def steam_analyze_game(params: AnalyzeGameInput) -> str:
+    """One-call brief on a game — price, all-time and 30-day reviews, players now, Deck, tags, latest update's effect, and news.
+
+    The "tell me about X" / "is X worth a look right now?" starting point: what
+    steam_get_app_details, steam_get_app_reviews, steam_get_current_players,
+    steam_get_app_tags, steam_get_update_impact and the news would say, in one
+    call. Review scores count what the store page counts, and the 30-day score is
+    exact. Facts, not a verdict. No API key required.
+
+    Args:
+        params (AnalyzeGameInput): appid, country_code.
+
+    Returns:
+        str: Markdown brief or JSON: the game's snapshot (price, release,
+        developers, genres, reviews and trend, players now, Deck, Metacritic,
+        platforms, play modes, achievements, DLC), top_tags, latest_update (the
+        newest update in 90 days with before/after reviews) and news.
+    """
+    try:
+        cc = params.country_code
+        row, tags_map, name_map, impact_s, news = await asyncio.gather(
+            _compare_row(params.appid, cc),
+            _items_tags([params.appid]),
+            _tag_name_map(),
+            steam_get_update_impact(UpdateImpactInput(
+                appid=params.appid, days=90, country_code=cc,
+                response_format=ResponseFormat.JSON)),
+            _announcements(params.appid),
+        )
+        if row.get("error"):
+            return row["error"]
+        tags = []
+        for t in (tags_map.get(params.appid) or [])[:8]:
+            try:
+                name = name_map.get(int(t.get("tagid")))
+            except (TypeError, ValueError):
+                name = None
+            if name:
+                tags.append(name)
+        updates = (_json_or_none(impact_s) or {}).get("updates") or []
+        out = {**row, "top_tags": tags,
+               "latest_update": updates[0] if updates else None, "news": news}
+        if params.response_format == ResponseFormat.JSON:
+            return _dump(out)
+        return _analyze_game_markdown(out)
+    except Exception as e:  # noqa: BLE001
+        return _handle_error(e)
+
+
+def _analyze_game_markdown(g: dict) -> str:
+    def pct(v):
+        return "n/a" if v is None else f"{v}%"
+
+    lines = [f"# {g['name']} (appid {g['appid']})"]
+    if g.get("short_description"):
+        lines += ["", g["short_description"]]
+    price = g["price"] or "n/a"
+    if g["discount_pct"]:
+        price += f" (-{g['discount_pct']}% off)"
+    lines += ["", f"- **Price**: {price}",
+              f"- **Released**: {g['release_date'] or 'n/a'}"
+              + (f" by {', '.join(g['developers'])}" if g["developers"] else "")]
+    if g["genres"]:
+        lines.append(f"- **Genres**: {', '.join(g['genres'])}")
+    reviews = (f"- **Reviews (all-time)**: {g['review_score_desc'] or 'n/a'}, "
+               f"{pct(g['positive_pct'])} of {g['total_reviews'] or 0:,}")
+    lines.append(reviews)
+    if g["recent_reviews"]:
+        trend = ""
+        if g["trend_pts"] is not None:
+            trend = f", {'+' if g['trend_pts'] >= 0 else ''}{g['trend_pts']} pts vs all-time"
+        sampled = " (sampled)" if g["recent_sampled"] else ""
+        lines.append(f"- **Last 30 days**: {pct(g['recent_positive_pct'])} of "
+                     f"{g['recent_reviews']:,}{trend}{sampled}")
+    if g["players_now"] is not None:
+        lines.append(f"- **Playing now**: {g['players_now']:,}")
+    facts = [f"Steam Deck {g['steam_deck']}" if g["steam_deck"] else None,
+             f"Metacritic {g['metacritic']}" if g["metacritic"] else None,
+             f"{g['achievements_total']} achievement"
+             f"{'' if g['achievements_total'] == 1 else 's'}"
+             if g["achievements_total"] else None,
+             f"{g['dlc_count']} DLC" if g["dlc_count"] else None]
+    if any(facts):
+        lines.append(f"- {' · '.join(f for f in facts if f)}")
+    modes = [label for key, label in (("singleplayer", "single-player"),
+                                      ("online_coop", "online co-op"),
+                                      ("local_coop", "local co-op"),
+                                      ("multiplayer", "multiplayer")) if g.get(key)]
+    if modes or g["platforms"]:
+        lines.append(f"- **Modes**: {', '.join(modes) or 'n/a'}; **platforms**: "
+                     f"{', '.join(g['platforms']) or 'n/a'}")
+    if g["top_tags"]:
+        lines.append(f"- **Tags**: {', '.join(g['top_tags'])}")
+    u = g["latest_update"]
+    if u:
+        if u["change_pts"] is not None:
+            sign = "+" if u["change_pts"] >= 0 else ""
+            effect = (f"{u['before']['positive_pct']}% → {u['after']['positive_pct']}% "
+                      f"({sign}{u['change_pts']} pts)")
+            if not u["after_window_complete"]:
+                effect += ", still settling"
+        else:
+            effect = "too early or too few reviews to tell"
+        lines.append(f"- **Latest update**: {u['date']} {u['title']}: {effect}")
+    if g["news"]:
+        lines += ["", "## Recent announcements"]
+        lines += [f"- {n['date']}: {n['title']}" for n in g["news"]]
     return "\n".join(lines)
 
 
@@ -7203,6 +7388,73 @@ def _lean_schemas() -> None:
             continue
 
 
+# Opt-in smaller tool set. Every tool definition is sent to the model on every
+# request, and 40 of them cost ~11.5k tokens; a chat user who only asks about
+# games and their own library can trade the long tail for a leaner context.
+# The default stays "all", so nothing changes unless someone asks for it.
+ENV_TOOLS = "STEAM_MCP_TOOLS"
+ESSENTIAL_TOOLS = frozenset({
+    "steam_search_apps", "steam_analyze_game", "steam_get_app_details",
+    "steam_get_app_reviews", "steam_compare_games", "steam_should_i_buy",
+    "steam_discover", "steam_recommend", "steam_get_update_impact",
+    "steam_get_featured_specials", "steam_get_player_summary",
+    "steam_get_owned_games", "steam_analyze_library", "steam_get_wishlist",
+    "steam_plan_coop_night",
+})
+
+
+def _tool_selection(spec: str, registered: set[str]) -> tuple[set[str], list[str]]:
+    """Resolve a STEAM_MCP_TOOLS value to (tools to keep, entries not understood).
+
+    "all" or empty keeps everything; "essentials" is ESSENTIAL_TOOLS; any other
+    comma-separated names are added to it, with or without the steam_ prefix, so
+    "essentials,get_inventory" works. A value that selects nothing keeps
+    everything rather than leaving a server with no tools.
+    """
+    keep: set[str] = set()
+    unknown: list[str] = []
+    for part in (p.strip().lower() for p in spec.split(",")):
+        if not part:
+            continue
+        if part == "all":
+            return set(registered), unknown
+        if part == "essentials":
+            keep |= ESSENTIAL_TOOLS & registered
+            continue
+        name = part if part.startswith("steam_") else f"steam_{part}"
+        if name in registered:
+            keep.add(name)
+        else:
+            unknown.append(part)
+    return (keep or set(registered)), unknown
+
+
+def _apply_tool_profile() -> None:
+    """Unregister the tools STEAM_MCP_TOOLS leaves out (best-effort, like the
+    other import-time passes: if the SDK internals change, every tool stays)."""
+    spec = (os.environ.get(ENV_TOOLS) or _dotenv_value(ENV_TOOLS) or "").strip()
+    if not spec or spec.lower() == "all":
+        return
+    try:
+        manager = mcp._tool_manager
+        registered = set(manager._tools)
+    except Exception:  # noqa: BLE001
+        return
+    keep, unknown = _tool_selection(spec, registered)
+    if unknown:
+        logging.getLogger(__name__).warning(
+            "%s: ignoring unknown tool names: %s", ENV_TOOLS, ", ".join(unknown))
+    for name in registered - keep:
+        try:
+            if hasattr(manager, "remove_tool"):
+                manager.remove_tool(name)
+            else:  # the v1 SDK's ToolManager has no remove_tool
+                manager._tools.pop(name, None)
+        except Exception:  # noqa: BLE001
+            manager._tools.pop(name, None)
+
+
+_apply_tool_profile()
 _compact_descriptions()
 _lean_schemas()
 
