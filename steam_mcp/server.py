@@ -810,22 +810,25 @@ async def _deck_compat(appid: int, language: str = "english") -> Optional[dict]:
     }
 
 
-async def _english_category_names(
-    appid: int, country_code: str, language: str, categories: list
-) -> dict:
-    """Map store category id -> English name, for language-independent matching.
+async def _english_app_data(appid: int, country_code: str, language: str) -> dict:
+    """Fetch an app's English appdetails `data`, for language-independent fields.
 
-    Feature flags and the play-mode list are derived by matching Steam's English
-    category names ("Co-op", "Steam Cloud", …), so reading them off a localized
-    appdetails response silently reports every one of them as absent. Category
-    *ids* are stable across languages, so re-read the same cached endpoint in
-    English and key off those.
+    Two things in a store payload can't be read off a localized response. Feature
+    flags and the play-mode list are derived by matching Steam's English category
+    names ("Co-op", "Steam Cloud", …), so a localized response silently reports
+    every one of them as absent. And `achievements.total` comes back as 0 on every
+    non-English request whatever the app really has — which is the only signal for
+    an app that has achievements without carrying the "Steam Achievements"
+    category (CS2 is one), so that flag goes false too.
 
-    Returns {} when the caller already asked for English, when the app has no
-    categories to translate, or when the extra lookup fails — in each case the
-    localized names are used, which is no worse than not asking.
+    Category *ids* are stable across languages, so re-read the same cached
+    endpoint in English and key off that for both.
+
+    Returns {} when the caller already asked for English or when the extra lookup
+    fails — in each case the localized payload is used, which is no worse than not
+    asking.
     """
-    if not categories or language.strip().lower() == "english":
+    if language.strip().lower() == "english":
         return {}
     try:
         data = await _store_get(
@@ -836,10 +839,7 @@ async def _english_category_names(
         entry = (data or {}).get(str(appid), {})
         if not entry.get("success"):
             return {}
-        return {
-            c.get("id"): c.get("description", "")
-            for c in (entry.get("data") or {}).get("categories", [])
-        }
+        return entry.get("data") or {}
     except Exception:  # noqa: BLE001
         return {}
 
@@ -2488,11 +2488,16 @@ async def steam_get_app_details(params: AppDetailsInput) -> str:
 
         # Everything below matches Steam's *English* category names, so pair each
         # localized name with its English counterpart: display stays in the
-        # caller's language, detection stops depending on it.
+        # caller's language, detection stops depending on it. The same lookup
+        # carries the achievement count, which Steam zeroes out when localized.
         raw_cats = d.get("categories", [])
-        en_names = await _english_category_names(
-            params.appid, params.country_code, params.language, raw_cats
+        en_data = await _english_app_data(
+            params.appid, params.country_code, params.language
         )
+        en_names = {
+            c.get("id"): c.get("description", "")
+            for c in (en_data.get("categories") or [])
+        }
         cat_pairs = [
             (c.get("description", ""),
              en_names.get(c.get("id")) or c.get("description", ""))
@@ -2514,6 +2519,12 @@ async def steam_get_app_details(params: AppDetailsInput) -> str:
         cd = d.get("content_descriptors") or {}
         pcr = d.get("pc_requirements")
         pcr = pcr if isinstance(pcr, dict) else {}
+        ach_total = (d.get("achievements") or {}).get("total")
+        if not ach_total:
+            # 0 on every non-English request, whatever the app has. en_data is {}
+            # for an English caller or a failed lookup, so this keeps whatever the
+            # localized payload said (0 or absent) rather than inventing a count.
+            ach_total = (en_data.get("achievements") or {}).get("total") or ach_total
 
         features = {
             "is_singleplayer": _has("single-player"),
@@ -2525,8 +2536,7 @@ async def steam_get_app_details(params: AppDetailsInput) -> str:
             or _has("controller support"),
             "has_cloud_saves": _has("steam cloud"),
             "has_trading_cards": _has("trading cards"),
-            "has_achievements": _has("steam achievements")
-            or bool((d.get("achievements") or {}).get("total")),
+            "has_achievements": _has("steam achievements") or bool(ach_total),
             "remote_play_together": _has("remote play together"),
             "family_sharing": _has("family sharing"),
             "vr_support": _has("vr "),
@@ -2555,7 +2565,7 @@ async def steam_get_app_details(params: AppDetailsInput) -> str:
             "metacritic": (d.get("metacritic") or {}).get("score"),
             "metacritic_url": (d.get("metacritic") or {}).get("url"),
             "recommendations_total": (d.get("recommendations") or {}).get("total"),
-            "achievements_total": (d.get("achievements") or {}).get("total"),
+            "achievements_total": ach_total,
             "dlc": d.get("dlc", []),
             "dlc_count": len(d.get("dlc", [])),
             "required_age": req_age,

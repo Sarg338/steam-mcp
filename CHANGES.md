@@ -4,6 +4,9 @@ A concise, one-line-per-change history. Versions follow
 [Semantic Versioning](https://semver.org/). Releases:
 <https://github.com/Sarg338/steam-mcp/releases>
 
+## [Unreleased]
+- **Fixed: a game's achievement count read as 0 for non-English callers.** Steam returns `achievements.total` as 0 on every non-English `appdetails` request — verified live across CS2, TF2, Elden Ring and Stardew Valley, all of which report 0 in German and French while English reports 1 / 520 / 42 / 49 — so `achievements_total` was wrong and the markdown **Achievements** line disappeared entirely. It also switched `has_achievements` off for a game that has achievements without carrying the "Steam Achievements" category, which is the only other signal (CS2 is such a game). The count now comes from the same cached English lookup the feature flags use; an English caller's genuine 0 is left alone.
+
 ## [1.16.1]
 - **Fixed: `steam_get_app_reviews` with `review_type="positive"` or `"negative"` could misreport the overall score.** Steam computes the score summary over the filtered set, so asking for negative excerpts turned the "Overall (all-time)" verdict into 0% positive. The summary is now always read unfiltered, and filtered excerpts come from a separate request. The default `review_type="all"` still makes a single request.
 - **Fixed: one failed page threw away the whole review answer.** A timeout part-way through the recent-reviews scan made `steam_get_app_reviews` and `steam_should_i_buy` return only an error, although the lifetime summary had already arrived. The scan now keeps what it counted and marks it `sampled`. If Steam returns nothing at all, the markdown says the recent score is unavailable rather than "0.0% of 0 reviews". A page Steam refuses is also reported as incomplete, not as full coverage.

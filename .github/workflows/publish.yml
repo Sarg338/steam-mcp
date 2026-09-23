@@ -23,7 +23,7 @@ name: Release
 
 on:
   schedule:
-    - cron: "0 17 * * *"   # daily, 17:00 UTC
+    - cron: "0 3 * * *"    # daily, 03:00 UTC = 10pm US Central (CDT); 9pm in CST
   workflow_dispatch:
     inputs:
       level:

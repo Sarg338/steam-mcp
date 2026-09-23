@@ -39,6 +39,11 @@ def test_excerpt_never_exceeds_its_limit():
     assert len(out) == 280 and out.endswith("…")       # over it: capped, not 281
     assert len(S._excerpt("x" * 5000)) == 280
     assert S._excerpt("abcdef", limit=3) == "ab…"
+    # Multi-byte text: the cap counts characters, not bytes. Live Korean and
+    # Japanese review excerpts come back at 280 chars / 660-818 bytes.
+    ko = S._excerpt("가" * 400)
+    assert len(ko) == 280 and ko.endswith("…")
+    assert len(ko.encode("utf-8")) == 840   # 279 hangul x 3 bytes + the ellipsis
 
 
 def test_review_excerpt_respects_the_cap():
@@ -703,15 +708,17 @@ def test_resource_app_reads(monkeypatch):
 
 
 def test_app_details_language(monkeypatch):
-    captured = {}
+    seen = []
 
     async def fake_store(path, params, cache_ttl=0):
-        captured.update(params)
+        seen.append(params.get("l"))
         return {"5": {"success": True, "data": {"name": "G", "type": "game"}}}
 
     monkeypatch.setattr(S, "_store_get", fake_store)
     run(S.steam_get_app_details(S.AppDetailsInput(appid=5, language="french")))
-    assert captured.get("l") == "french"
+    # The caller's own request is in their language; the follow-up that reads
+    # the fields Steam localizes away is deliberately English.
+    assert seen == ["french", "english"]
 
 
 # Feature flags match English category names. A localized response must not turn
@@ -728,16 +735,26 @@ ENGLISH_CATS = [
     {"id": 38, "description": "Online Co-op"},
     {"id": 23, "description": "Steam Cloud"},
 ]
+# A non-Latin script exercises the same path with nothing an English substring
+# match could latch onto by accident, and round-trips multi-byte text through
+# the response. Steam's language name for Korean is "koreana", not "korean".
+KOREAN_CATS = [
+    {"id": 2, "description": "싱글 플레이어"},
+    {"id": 9, "description": "협동"},
+    {"id": 38, "description": "온라인 협동"},
+    {"id": 23, "description": "Steam 클라우드"},
+]
 
 
 async def _none():
     return None
 
 
-def _app_details_store(calls, english_cats=ENGLISH_CATS):
+def _app_details_store(calls, english_cats=ENGLISH_CATS,
+                       localized_cats=LOCALIZED_CATS):
     async def fake_store(path, params, cache_ttl=0):
         calls.append(params.get("l"))
-        cats = english_cats if params.get("l") == "english" else LOCALIZED_CATS
+        cats = english_cats if params.get("l") == "english" else localized_cats
         return {"5": {"success": True,
                       "data": {"name": "G", "type": "game", "categories": cats}}}
     return fake_store
@@ -767,6 +784,33 @@ def test_app_details_features_survive_a_localized_response(monkeypatch):
     assert "Steam Cloud (nuage)" not in text     # a feature, not a play mode
 
 
+def test_app_details_features_survive_a_non_latin_response(monkeypatch):
+    """Same defect in a non-Latin script, where no English substring could match
+    by accident. Verified live against CS2 / Stardew Valley / Elden Ring in
+    koreana, japanese, russian, thai and tchinese."""
+    calls = []
+    monkeypatch.setattr(S, "_store_get",
+                        _app_details_store(calls, localized_cats=KOREAN_CATS))
+    monkeypatch.setattr(S, "_deck_compat", lambda *a, **k: _none())
+    out = run(S.steam_get_app_details(
+        S.AppDetailsInput(appid=5, language="koreana", response_format="json")))
+    d = json.loads(out)
+
+    assert d["features"]["is_singleplayer"] is True
+    assert d["features"]["is_coop"] is True
+    assert d["features"]["is_online_coop"] is True
+    assert d["features"]["has_cloud_saves"] is True
+    # Hangul comes back intact, not escaped or transliterated.
+    assert d["categories"] == [c["description"] for c in KOREAN_CATS]
+    assert calls == ["koreana", "english"]
+
+    calls.clear()
+    text = run(S.steam_get_app_details(
+        S.AppDetailsInput(appid=5, language="koreana")))
+    assert "싱글 플레이어, 협동, 온라인 협동" in text
+    assert "Steam 클라우드" not in text   # a feature, not a play mode
+
+
 def test_app_details_features_skip_the_english_lookup_for_english(monkeypatch):
     calls = []
     monkeypatch.setattr(S, "_store_get", _app_details_store(calls))
@@ -792,6 +836,68 @@ def test_app_details_survives_a_failed_english_lookup(monkeypatch):
     # Best-effort: the tool still answers, with the pre-fix detection quality.
     assert d["name"] == "G"
     assert d["categories"] == [c["description"] for c in LOCALIZED_CATS]
+
+
+def _achievement_store(calls, localized_cats, english_cats, total=42):
+    """appdetails where only the English payload carries the achievement count.
+
+    Verified live 2026-09: CS2, TF2 and Elden Ring all report
+    `achievements.total` as 0 in German while English reports 1 / 520 / 42.
+    """
+    async def fake_store(path, params, cache_ttl=0):
+        english = params.get("l") == "english"
+        calls.append(params.get("l"))
+        return {"5": {"success": True, "data": {
+            "name": "G", "type": "game",
+            "categories": english_cats if english else localized_cats,
+            "achievements": {"total": total if english else 0},
+        }}}
+    return fake_store
+
+
+def test_app_details_reads_the_achievement_count_in_english(monkeypatch):
+    """An app with achievements but no "Steam Achievements" category (CS2's
+    shape) has only the count to go on — and the count is 0 in any language."""
+    calls = []
+    monkeypatch.setattr(S, "_store_get", _achievement_store(
+        calls,
+        [{"id": 1, "description": "Mehrspieler"}],
+        [{"id": 1, "description": "Multi-player"}],
+    ))
+    monkeypatch.setattr(S, "_deck_compat", lambda *a, **k: _none())
+    out = run(S.steam_get_app_details(
+        S.AppDetailsInput(appid=5, language="german", response_format="json")))
+    d = json.loads(out)
+    assert d["achievements_total"] == 42
+    assert d["features"]["has_achievements"] is True
+    assert calls == ["german", "english"]
+
+
+def test_app_details_keeps_a_genuine_zero_for_english(monkeypatch):
+    """The English payload is authoritative for an English caller: no second
+    lookup, and an app that really has no achievements still says so."""
+    calls = []
+    monkeypatch.setattr(S, "_store_get", _achievement_store(
+        calls, LOCALIZED_CATS, ENGLISH_CATS, total=0))
+    monkeypatch.setattr(S, "_deck_compat", lambda *a, **k: _none())
+    out = run(S.steam_get_app_details(
+        S.AppDetailsInput(appid=5, response_format="json")))
+    d = json.loads(out)
+    assert d["achievements_total"] == 0
+    assert d["features"]["has_achievements"] is False
+    assert calls == ["english"]
+
+
+def test_app_details_looks_up_english_without_categories(monkeypatch):
+    """No categories is not a reason to skip the lookup: the achievement count
+    still needs it."""
+    calls = []
+    monkeypatch.setattr(S, "_store_get", _achievement_store(calls, [], []))
+    monkeypatch.setattr(S, "_deck_compat", lambda *a, **k: _none())
+    out = run(S.steam_get_app_details(
+        S.AppDetailsInput(appid=5, language="german", response_format="json")))
+    assert json.loads(out)["achievements_total"] == 42
+    assert calls == ["german", "english"]
 
 
 def test_app_reviews_language(monkeypatch):
@@ -2082,9 +2188,11 @@ def test_tool_descriptions_are_trimmed_to_one_line():
 def test_version_is_in_sync_across_metadata():
     import pathlib
     root = pathlib.Path(__file__).resolve().parent.parent
-    assert f'version = "{S.__version__}"' in (root / "pyproject.toml").read_text()
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+    assert f'version = "{S.__version__}"' in pyproject
     for name in ("server.json", "manifest.json"):
-        assert f'"version": "{S.__version__}"' in (root / name).read_text(), name
+        text = (root / name).read_text(encoding="utf-8")
+        assert f'"version": "{S.__version__}"' in text, name
 
 
 def test_cache_hint_methods_are_all_cacheable():
@@ -2460,7 +2568,12 @@ def test_readme_key_column_matches_the_code():
     of the same fact. Drift means the docs promise something the server denies."""
     import pathlib
 
-    readme = (pathlib.Path(__file__).resolve().parent.parent / "README.md").read_text()
+    # encoding pinned: the table's "yes†" marker is UTF-8, and read_text()
+    # would otherwise decode it through the platform codepage (cp1252 on
+    # Windows), dropping that row from the parse.
+    readme = (pathlib.Path(__file__).resolve().parent.parent / "README.md").read_text(
+        encoding="utf-8"
+    )
     rows = re.findall(r"^\| `(steam_\w+)` \|.*\| (no\*|no|yes†|yes) \|$", readme, re.M)
     assert len(rows) == 37, f"parsed {len(rows)} tool rows, expected 37"
     for name, marker in rows:

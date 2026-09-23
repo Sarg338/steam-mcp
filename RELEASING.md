@@ -25,7 +25,7 @@ Both markers are optional HTML comments (invisible on GitHub):
 
 ## What happens
 
-`.github/workflows/publish.yml` runs every day at 17:00 UTC. If `[Unreleased]` is
+`.github/workflows/publish.yml` runs every day at 03:00 UTC (10pm US Central during daylight time, 9pm in winter). If `[Unreleased]` is
 empty it does nothing. Otherwise it:
 
 1. Runs `release.py check`, ruff, the tests and the token audit.
