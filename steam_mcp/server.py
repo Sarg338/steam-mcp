@@ -2464,6 +2464,63 @@ async def steam_get_rarest_unlocks(params: RarestUnlocksInput) -> str:
 # Tools: store (no API key required)
 # ---------------------------------------------------------------------------
 
+# IStoreBrowseService's EStoreAppType codes, for telling a game from its DLC,
+# soundtrack or demo in search results.
+_STORE_APP_TYPES = {
+    0: "game", 1: "demo", 2: "mod", 3: "movie", 4: "dlc", 5: "guide",
+    6: "software", 7: "video", 8: "series", 9: "episode", 10: "hardware",
+    11: "soundtrack", 12: "beta", 13: "tool", 14: "advertising",
+}
+
+
+async def _items_types(appids: list[int]) -> dict[int, tuple[str | None, int | None]]:
+    """One GetItems call -> {appid: (type name, parent appid)} (no key).
+
+    The parent is the base game for a DLC or soundtrack. Best-effort: an empty
+    dict on failure, so callers keep working without the types.
+    """
+    if not appids:
+        return {}
+    body = {
+        "ids": [{"appid": a} for a in appids],
+        "context": {"language": "english", "country_code": "US", "steam_realm": 1},
+        "data_request": {},
+    }
+    try:
+        data = await _steam_get(
+            "IStoreBrowseService/GetItems/v1/",
+            {"input_json": json.dumps(body, separators=(",", ":"))},
+            with_key=False,
+            cache_ttl=CACHE_TTL_TAGS,
+        )
+    except Exception:  # noqa: BLE001
+        return {}
+    out = {}
+    for it in (data.get("response") or {}).get("store_items", []):
+        parent = (it.get("related_items") or {}).get("parent_appid")
+        out[it.get("appid")] = (_STORE_APP_TYPES.get(it.get("type")), parent)
+    return out
+
+
+def _title_key(name: str | None) -> str:
+    """Normalize a title for exact matching: case, marks and punctuation aside."""
+    name = re.sub(r"[™®©]", "", (name or "").casefold())
+    return re.sub(r"[\W_]+", " ", name).strip()
+
+
+def _rank_search(rows: list[dict], query: str) -> list[dict]:
+    """Put what someone typing `query` most likely means first.
+
+    Steam's storesearch ranks by popularity, so "Hades" returned Hades II ahead
+    of Hades and "The Witcher 3" returned a DLC first; the store's own search page
+    puts an exact title first. Order: exact title, then base games before DLC /
+    soundtracks / demos / tools, then Steam's order (the sort is stable).
+    """
+    q = _title_key(query)
+    return sorted(rows, key=lambda r: (_title_key(r["name"]) != q,
+                                       r.get("type") not in (None, "game")))
+
+
 @mcp.tool(
     name="steam_search_apps",
     structured_output=False,
@@ -2489,27 +2546,35 @@ async def steam_search_apps(params: AppSearchInput) -> str:
             "storesearch/",
             {"term": params.query, "l": params.language, "cc": params.country_code},
         )
-        items = data.get("items", [])[: params.limit]
-        rows = [
-            {
+        items = data.get("items", [])
+        types = await _items_types([it.get("id") for it in items if it.get("id")])
+        rows = []
+        for it in items:
+            kind, parent = types.get(it.get("id"), (None, None))
+            rows.append({
                 "appid": it.get("id"),
                 "name": it.get("name"),
+                "type": kind,
+                "parent_appid": parent,
                 "price": (it.get("price") or {}).get("final"),
                 "currency": (it.get("price") or {}).get("currency"),
-            }
-            for it in items
-        ]
-        if not rows:
-            return f"No store results for '{params.query}'."
+            })
+        rows = _rank_search(rows, params.query)[: params.limit]
         if params.response_format == ResponseFormat.JSON:
             return _dump({"query": params.query, "count": len(rows), "results": rows})
+        if not rows:
+            return f"No store results for '{params.query}'."
 
         lines = [f"# Store search: '{params.query}'", ""]
         for r in rows:
             price = ""
             if r["price"]:
                 price = f" — {_fmt_amount(r['price'] / 100, r['currency'])}"
-            lines.append(f"- **{r['name']}** (appid {r['appid']}){price}")
+            kind = ""
+            if r["type"] not in (None, "game"):
+                kind = (f" [{r['type']} for appid {r['parent_appid']}]"
+                        if r["parent_appid"] else f" [{r['type']}]")
+            lines.append(f"- **{r['name']}** (appid {r['appid']}){kind}{price}")
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001
         return _handle_error(e)
@@ -2934,6 +2999,9 @@ async def steam_get_app_tags(params: AppTagsInput) -> str:
         name = item.get("name") or str(params.appid)
         raw_tags = item.get("tags") or []
         if not raw_tags:
+            if params.response_format == ResponseFormat.JSON:
+                return _dump({"appid": params.appid, "name": name, "count": 0,
+                              "tags": []})
             return f"No community tags found for {name} (appid {params.appid})."
         name_map = await _tag_name_map()
         rows = []
@@ -4211,12 +4279,12 @@ async def steam_get_featured_specials(params: FeaturedInput) -> str:
     try:
         data = await _fetch_featured(params.country_code)
         rows = _featured_rows(data.get("specials", {}).get("items", []), params.limit)
-        if not rows:
-            return "No featured specials returned right now."
         if params.response_format == ResponseFormat.JSON:
             return _dump(
                 {"country": params.country_code, "count": len(rows), "specials": rows}
             )
+        if not rows:
+            return "No featured specials returned right now."
 
         lines = [f"# Steam specials on sale ({params.country_code.upper()})", ""]
         for r in rows:
@@ -4259,8 +4327,6 @@ async def steam_get_store_highlights(params: StoreHighlightsInput) -> str:
         node = data.get(params.section, {})
         items = node.get("items", []) if isinstance(node, dict) else []
         rows = _featured_rows(items, params.limit)
-        if not rows:
-            return f"No items returned for section '{params.section}'."
         if params.response_format == ResponseFormat.JSON:
             return _dump(
                 {
@@ -4270,6 +4336,8 @@ async def steam_get_store_highlights(params: StoreHighlightsInput) -> str:
                     "items": rows,
                 }
             )
+        if not rows:
+            return f"No items returned for section '{params.section}'."
 
         titles = {
             "top_sellers": "Top sellers",
@@ -4473,10 +4541,10 @@ async def steam_get_app_news(params: AppNewsInput) -> str:
                     "excerpt": _excerpt(body),
                 }
             )
-        if not rows:
-            return f"No news found for app {params.appid}."
         if params.response_format == ResponseFormat.JSON:
             return _dump({"appid": params.appid, "count": len(rows), "news": rows})
+        if not rows:
+            return f"No news found for app {params.appid}."
 
         import datetime as _dt
 

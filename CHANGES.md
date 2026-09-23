@@ -5,6 +5,10 @@ A concise, one-line-per-change history. Versions follow
 <https://github.com/Sarg338/steam-mcp/releases>
 
 ## [Unreleased]
+<!-- release: minor -->
+- **Fixed: search put sequels and DLC ahead of the exact title.**
+- **Search results say whether each is a game, DLC or soundtrack.**
+- **Fixed: empty results broke JSON output in five list tools.**
 - **Fixed: `steam_mcp.__version__` still reported 1.11.2.**
 
 ## [1.17.0]
