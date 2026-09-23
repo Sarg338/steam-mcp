@@ -4,8 +4,7 @@ A concise, one-line-per-change history. Versions follow
 [Semantic Versioning](https://semver.org/). Releases:
 <https://github.com/Sarg338/steam-mcp/releases>
 
-## [Unreleased]
-<!-- release: minor -->
+## [1.18.0]
 - **New tool: `steam_compare_games`.**
 - **New tool: `steam_get_update_impact`.**
 - **Recent review scores are now exact, not sampled.**
