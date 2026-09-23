@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Release bookkeeping for steam-mcp: one version, five places, one changelog.
+"""Release bookkeeping for steam-mcp: one version, six places, one changelog.
 
 The version lives in pyproject.toml, manifest.json, server.json (twice) and
-steam_mcp/server.py's __version__. Changes accumulate under `## [Unreleased]` in
+the __version__ of both steam_mcp/__init__.py and steam_mcp/server.py. Changes accumulate under `## [Unreleased]` in
 CHANGES.md as they merge; the publish workflow turns that section into a release.
 
 Commands (standard library only, so CI can run them before installing anything):
@@ -40,6 +40,7 @@ PYPROJECT = ROOT / "pyproject.toml"
 MANIFEST = ROOT / "manifest.json"
 SERVER_JSON = ROOT / "server.json"
 SERVER_PY = ROOT / "steam_mcp" / "server.py"
+INIT_PY = ROOT / "steam_mcp" / "__init__.py"
 CHANGES = ROOT / "CHANGES.md"
 
 LEVELS = ("patch", "minor", "major")
@@ -61,12 +62,14 @@ def versions() -> dict[str, str | None]:
                  if p.get("registryType") == "pypi"), {})
     py = PYPROJECT_RE.search(PYPROJECT.read_text(encoding="utf-8"))
     sv = SERVER_PY_RE.search(SERVER_PY.read_text(encoding="utf-8"))
+    iv = SERVER_PY_RE.search(INIT_PY.read_text(encoding="utf-8"))
     return {
         "pyproject.toml [project].version": py.group(1) if py else None,
         "manifest.json version": manifest.get("version"),
         "server.json version": server.get("version"),
         "server.json packages[pypi].version": pypi.get("version"),
         "steam_mcp/server.py __version__": sv.group(1) if sv else None,
+        "steam_mcp/__init__.py __version__": iv.group(1) if iv else None,
     }
 
 
@@ -192,9 +195,10 @@ def cmd_bump(level: str = "auto") -> int:
     PYPROJECT.write_text(PYPROJECT_RE.sub(f'version = "{new}"',
                                           PYPROJECT.read_text(encoding="utf-8"),
                                           count=1), encoding="utf-8")
-    SERVER_PY.write_text(SERVER_PY_RE.sub(f'__version__ = "{new}"',
-                                          SERVER_PY.read_text(encoding="utf-8"),
-                                          count=1), encoding="utf-8")
+    for path in (SERVER_PY, INIT_PY):
+        path.write_text(SERVER_PY_RE.sub(f'__version__ = "{new}"',
+                                         path.read_text(encoding="utf-8"),
+                                         count=1), encoding="utf-8")
     # The JSON files are edited in place rather than re-serialized, so their
     # formatting (and anything a re-dump would normalize) stays untouched;
     # cmd_check below confirms every field landed.

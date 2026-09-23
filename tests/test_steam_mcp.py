@@ -2193,6 +2193,8 @@ def test_version_is_in_sync_across_metadata():
     for name in ("server.json", "manifest.json"):
         text = (root / name).read_text(encoding="utf-8")
         assert f'"version": "{S.__version__}"' in text, name
+    import steam_mcp
+    assert steam_mcp.__version__ == S.__version__  # stuck at 1.11.2 until 1.17.1
 
 
 def test_cache_hint_methods_are_all_cacheable():
@@ -3343,3 +3345,31 @@ def test_review_timeline_rolls_up_by_span():
     tl = S._review_timeline(many, Counter())
     assert len(tl["periods"]) == S.REVIEW_TIMELINE_CAP and tl["truncated"]
     assert S._review_timeline(Counter(), Counter())["periods"] == []
+
+
+def test_release_bump_updates_every_version_field(tmp_path):
+    """Run a real bump on a scratch copy: every field moves, both __version__s
+    included (the package one was missed for six releases)."""
+    import pathlib
+    import shutil
+    import subprocess
+    import sys
+    root = pathlib.Path(__file__).resolve().parent.parent
+    for rel in ("scripts/release.py", "pyproject.toml", "manifest.json",
+                "server.json", "steam_mcp/server.py", "steam_mcp/__init__.py"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(root / rel, tmp_path / rel)
+    (tmp_path / "CHANGES.md").write_text(
+        "# Changelog\n\n## [Unreleased]\n- **Fixed: a thing.**\n\n"
+        f"## [{S.__version__}]\n- **Older.**\n", encoding="utf-8")
+    script = str(tmp_path / "scripts" / "release.py")
+    res = subprocess.run([sys.executable, script, "bump", "patch"],
+                         capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+    new = res.stdout.strip().splitlines()[-1]
+    assert new != S.__version__
+    for rel in ("steam_mcp/server.py", "steam_mcp/__init__.py"):
+        assert f'__version__ = "{new}"' in (tmp_path / rel).read_text(encoding="utf-8")
+    check = subprocess.run([sys.executable, script, "check"],
+                           capture_output=True, text=True)
+    assert check.returncode == 0, check.stdout + check.stderr

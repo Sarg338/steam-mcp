@@ -7,7 +7,8 @@ by hand.
 
 Every PR that changes shipped behaviour adds a line under `## [Unreleased]` at the
 top of `CHANGES.md` (CI warns on a code change without one). Don't touch version
-numbers.
+numbers. Keep each entry to its one-line bold headline; the explanation belongs in
+the PR and commit message, not the changelog (it becomes the release notes).
 
 ```markdown
 ## [Unreleased]
@@ -29,8 +30,8 @@ Both markers are optional HTML comments (invisible on GitHub):
 empty it does nothing. Otherwise it:
 
 1. Runs `release.py check`, ruff, the tests and the token audit.
-2. Runs `scripts/release.py bump`, which sets the new version in all five places
-   (pyproject, manifest, both server.json fields, `__version__`) and renames the
+2. Runs `scripts/release.py bump`, which sets the new version in all six places
+   (pyproject, manifest, both server.json fields, both `__version__`s) and renames the
    section.
 3. Commits `X.Y.Z: release` to `main` and tags `vX.Y.Z`.
 4. Builds the sdist, the wheel and `steam-mcp.mcpb`.
@@ -55,6 +56,6 @@ failed because `main` moved while it ran, just run it again.
 ## Checking locally
 
 ```bash
-python scripts/release.py check     # the five version fields agree; CHANGES.md is well formed
+python scripts/release.py check     # the six version fields agree; CHANGES.md is well formed
 python scripts/release.py pending   # anything waiting to ship?
 ```
