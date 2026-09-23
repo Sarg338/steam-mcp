@@ -1924,7 +1924,11 @@ def test_search_apps_currency(monkeypatch):
         return {"items": [
             {"id": 7, "name": "Game7", "price": {"currency": "EUR", "final": 1999}}]}
 
+    async def no_types(appids):
+        return {}
+
     monkeypatch.setattr(S, "_store_get", fake_store)
+    monkeypatch.setattr(S, "_items_types", no_types)
     out = run(S.steam_search_apps(S.AppSearchInput(query="g", country_code="de")))
     assert "€19.99" in out and "$" not in out
 
@@ -3373,3 +3377,96 @@ def test_release_bump_updates_every_version_field(tmp_path):
     check = subprocess.run([sys.executable, script, "check"],
                            capture_output=True, text=True)
     assert check.returncode == 0, check.stdout + check.stderr
+
+
+# --------------------------------------------------------------------------- #
+# Search ranking: what someone typing the title means (found by live_check)
+# --------------------------------------------------------------------------- #
+
+def _search_fakes(monkeypatch, items, types):
+    async def fake_store(path, params, cache_ttl=0):
+        return {"items": [{"id": a, "name": n} for a, n in items]}
+
+    async def fake_types(appids):
+        if types is None:
+            raise AssertionError("unreachable")
+        return types
+
+    monkeypatch.setattr(S, "_store_get", fake_store)
+    monkeypatch.setattr(S, "_items_types", fake_types)
+
+
+def _search(query, **kw):
+    return json.loads(run(S.steam_search_apps(S.AppSearchInput(
+        query=query, response_format="json", **kw))))["results"]
+
+
+def test_search_puts_the_exact_title_first(monkeypatch):
+    # Steam's storesearch order for "Hades" (live, 2026-09): the sequel first.
+    _search_fakes(monkeypatch, [(1145350, "Hades II"), (1145360, "Hades"),
+                                (1206340, "Hades Original Soundtrack")],
+                  {1145350: ("game", None), 1145360: ("game", None),
+                   1206340: ("soundtrack", 1145360)})
+    got = _search("hades")
+    assert [r["appid"] for r in got] == [1145360, 1145350, 1206340]
+    assert got[2]["type"] == "soundtrack" and got[2]["parent_appid"] == 1145360
+
+
+def test_search_puts_games_before_their_dlc(monkeypatch):
+    # "The Witcher 3" (live): a DLC first, the game second, no exact title.
+    _search_fakes(monkeypatch, [
+        (5006530, "The Witcher 3: Wild Hunt — Songs of the Past"),
+        (292030, "The Witcher 3: Wild Hunt - Complete Edition"),
+        (2684660, "The Witcher 3 REDkit")],
+        {5006530: ("dlc", 292030), 292030: ("game", None),
+         2684660: ("software", None)})
+    assert [r["appid"] for r in _search("The Witcher 3")] == [292030, 5006530, 2684660]
+    md = run(S.steam_search_apps(S.AppSearchInput(query="The Witcher 3")))
+    assert "[dlc for appid 292030]" in md and "[software]" in md
+
+
+def test_search_exact_match_ignores_case_marks_and_punctuation(monkeypatch):
+    _search_fakes(monkeypatch, [(3017860, "DOOM: The Dark Ages"), (379720, "DOOM®")],
+                  {})
+    assert _search("doom")[0]["appid"] == 379720          # types unknown: still works
+    assert S._title_key("Half-Life™") == S._title_key("half life")
+
+
+def test_search_limit_applies_after_ranking(monkeypatch):
+    _search_fakes(monkeypatch, [(1, "Portal 2"), (2, "Portal Knights"), (3, "Portal")],
+                  {})
+    assert [r["appid"] for r in _search("Portal", limit=1)] == [3]
+
+
+def test_items_types_failure_is_not_fatal(monkeypatch):
+    async def boom(*a, **k):
+        raise S.httpx.TimeoutException("slow")
+
+    monkeypatch.setattr(S, "_steam_get", boom)
+    assert run(S._items_types([1, 2])) == {}
+
+
+def test_empty_results_are_valid_json(monkeypatch):
+    async def empty_store(path, params, cache_ttl=0):
+        return {"items": [], "specials": {"items": []}, "top_sellers": {"items": []}}
+
+    async def no_news(path, params, **k):
+        return {"appnews": {"newsitems": []}}
+
+    async def no_types(appids):
+        return {}
+
+    monkeypatch.setattr(S, "_store_get", empty_store)
+    monkeypatch.setattr(S, "_steam_get", no_news)
+    monkeypatch.setattr(S, "_items_types", no_types)
+    j = "json"
+    assert json.loads(run(S.steam_search_apps(S.AppSearchInput(
+        query="zzz", response_format=j))))["results"] == []
+    assert json.loads(run(S.steam_get_featured_specials(S.FeaturedInput(
+        response_format=j))))["specials"] == []
+    assert json.loads(run(S.steam_get_store_highlights(S.StoreHighlightsInput(
+        section="top_sellers", response_format=j))))["items"] == []
+    assert json.loads(run(S.steam_get_app_news(S.AppNewsInput(
+        appid=1, response_format=j))))["news"] == []
+    # markdown keeps its plain sentence
+    assert "No store results" in run(S.steam_search_apps(S.AppSearchInput(query="zzz")))
