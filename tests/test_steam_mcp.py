@@ -463,6 +463,8 @@ def test_should_i_buy(monkeypatch):
             "metacritic": {"score": 88}}}}
 
     async def fake_raw(url, params, cache_ttl=0):
+        if "start_date" in params:  # refuse the windowed summary: use the scan
+            return {"success": 2}
         if params.get("filter") == "recent":
             return {"success": 1, "cursor": "*", "reviews": [
                 {"voted_up": True, "timestamp_created": now - 10},
@@ -1879,6 +1881,8 @@ def test_app_reviews_recent_window(monkeypatch):
             "reviews": []}
 
     async def fake_raw(url, params, cache_ttl=0):
+        if "start_date" in params:  # refuse the windowed summary: use the scan
+            return {"success": 2}
         if params.get("filter") == "recent":
             return {"success": 1, "reviews": [
                 {"voted_up": True, "timestamp_created": now - 10},
@@ -2178,7 +2182,7 @@ def test_friends_who_own(monkeypatch):
 
 def test_server_registers_its_surface():
     """The server object builds on whichever SDK major is installed."""
-    assert len(S.mcp._tool_manager.list_tools()) == 38
+    assert len(S.mcp._tool_manager.list_tools()) == 40
     assert len(S.mcp._prompt_manager.list_prompts()) == 5
 
 
@@ -2418,6 +2422,7 @@ _MINIMAL_ARGS = {
     "published_file_id": "123",
     "market_hash_name": "AK-47 | Redline (Field-Tested)",
     "steamid_b": "76561197960287930",
+    "appids": [570, 730],
 }
 
 
@@ -2581,7 +2586,7 @@ def test_readme_key_column_matches_the_code():
         encoding="utf-8"
     )
     rows = re.findall(r"^\| `(steam_\w+)` \|.*\| (no\*|no|yes†|yes) \|$", readme, re.M)
-    assert len(rows) == 38, f"parsed {len(rows)} tool rows, expected 38"
+    assert len(rows) == 40, f"parsed {len(rows)} tool rows, expected 40"
     for name, marker in rows:
         if marker == "no":
             assert name in S.KEYLESS_TOOLS, f"{name} documented keyless, is not"
@@ -2853,6 +2858,8 @@ def test_app_reviews_survive_a_failed_recent_scan(monkeypatch):
     # The lifetime summary came back; a timeout in the recent tally must not
     # turn the whole answer into an error.
     async def fake_raw(url, params, cache_ttl=0):
+        if "start_date" in params:  # refuse the windowed summary: use the scan
+            return {"success": 2}
         if params["filter"] == "all":
             return {"success": 1, "reviews": [], "query_summary": {
                 "review_score_desc": "Very Positive", "total_reviews": 10,
@@ -3049,6 +3056,8 @@ def _population_fakes(monkeypatch, is_free, price_ok=True):
         return {"appid": appid, "name": "G", "is_free": is_free}
 
     async def fake_raw(url, params, cache_ttl=0):
+        if "start_date" in params:  # refuse the windowed summary: use the scan
+            return {"success": 2}
         calls.append((params["filter"], params["purchase_type"]))
         if params["filter"] == "recent":
             return {"success": 1, "cursor": "*",
@@ -3107,6 +3116,8 @@ def test_should_i_buy_scores_the_store_population(monkeypatch):
         return {"7": {"success": True, "data": {"name": "Paid", "is_free": False}}}
 
     async def fake_raw(url, params, cache_ttl=0):
+        if "start_date" in params:  # refuse the windowed summary: use the scan
+            return {"success": 2}
         seen.append((params["filter"], params["purchase_type"]))
         if params["filter"] == "recent":
             return {"success": 1, "cursor": "*", "reviews": []}
@@ -3470,3 +3481,233 @@ def test_empty_results_are_valid_json(monkeypatch):
         appid=1, response_format=j))))["news"] == []
     # markdown keeps its plain sentence
     assert "No store results" in run(S.steam_search_apps(S.AppSearchInput(query="zzz")))
+
+
+# --------------------------------------------------------------------------- #
+# Windowed review summaries: Steam scores any date range in one request
+# --------------------------------------------------------------------------- #
+
+def _summary(pos, neg, desc="Very Positive"):
+    return {"success": 1, "reviews": [], "query_summary": {
+        "review_score_desc": desc, "total_positive": pos, "total_negative": neg,
+        "total_reviews": pos + neg}}
+
+
+def test_recent_score_is_one_exact_windowed_request(monkeypatch):
+    calls = []
+
+    async def fake_raw(url, params, cache_ttl=0):
+        calls.append(dict(params))
+        if "start_date" in params:
+            return _summary(7_000, 3_000, "Mostly Positive")
+        return _summary(90_000, 10_000)
+
+    async def paid(appid, cc):
+        return {"appid": appid, "name": "G", "is_free": False}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(S, "_app_price", paid)
+    d = json.loads(run(S.steam_get_app_reviews(S.AppReviewsInput(
+        appid=1, review_filter="recent", day_range=30, limit=0,
+        response_format="json"))))
+    rc = d["recent"]
+    assert (rc["reviews_counted"], rc["positive"], rc["positive_pct"]) == (10_000, 7_000, 70.0)
+    assert rc["review_score_desc"] == "Mostly Positive" and rc["sampled"] is False
+    win = [c for c in calls if "start_date" in c]
+    assert len(win) == 1 and not any(c["filter"] == "recent" for c in calls)  # no scan
+    w = win[0]
+    assert w["date_range_type"] == "include" and w["purchase_type"] == "steam"
+    assert w["end_date"] - w["start_date"] == 30 * 86400
+    assert w["end_date"] % 3600 == 0                       # hour-aligned: cacheable
+
+
+def test_recent_score_falls_back_to_the_scan_when_refused(monkeypatch):
+    import time as _t
+    now = int(_t.time())
+
+    async def fake_raw(url, params, cache_ttl=0):
+        if "start_date" in params:
+            return {"success": 2}
+        if params["filter"] == "recent":
+            return {"success": 1, "cursor": "*", "reviews": [
+                _review("1", now - 5), _review("2", now - 99 * 86400)]}
+        return _summary(9, 1)
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    rc, rows = run(S._recent_reviews(1, 30, "us", language="english",
+                                     purchase_type="all"))
+    assert rc["reviews_counted"] == 1 and rc["review_score_desc"] is None
+    assert len(rows) == 1
+
+
+def test_review_window_is_none_on_failure(monkeypatch):
+    async def boom(url, params, cache_ttl=0):
+        raise S.httpx.TimeoutException("slow")
+
+    monkeypatch.setattr(S, "_raw_get", boom)
+    assert run(S._review_window(1, 0, 1, language="all", purchase_type="all",
+                                cc="us")) is None
+
+
+# --------------------------------------------------------------------------- #
+# steam_compare_games
+# --------------------------------------------------------------------------- #
+
+def _compare_fakes(monkeypatch, broken=()):
+    games = {
+        1: {"name": "Cheap Classic", "price": "$9.99", "life": 98.0, "recent": 97.0,
+            "players": 500, "cents": 999, "tags": [11, 12]},
+        2: {"name": "Busy Sequel", "price": "$29.99", "life": 90.0, "recent": 80.0,
+            "players": 9000, "cents": 2999, "tags": [11, 13]},
+    }
+
+    async def details(p):
+        if p.appid in broken:
+            return f"Error: no store details for app {p.appid}."
+        g = games[p.appid]
+        return json.dumps({"name": g["name"], "price": g["price"], "is_free": False,
+                           "discount_pct": 0, "steam_deck": "Verified",
+                           "features": {"is_online_coop": p.appid == 2}})
+
+    async def reviews(p):
+        g = games[p.appid]
+        return json.dumps({
+            "summary": {"review_score_desc": "Very Positive",
+                        "positive_pct": g["life"], "total_reviews": 1000},
+            "recent": {"positive_pct": g["recent"], "reviews_counted": 100,
+                       "sampled": False}})
+
+    async def players(p):
+        return json.dumps({"current_players": games[p.appid]["players"]})
+
+    async def tags(appids):
+        return {a: [{"tagid": t} for t in games[a]["tags"]] for a in appids}
+
+    async def prices(appids, cc):
+        return {a: {"price_cents": games[a]["cents"]} for a in appids}
+
+    async def names():
+        return {11: "Roguelike", 12: "Indie", 13: "Action"}
+
+    for name, fn in (("steam_get_app_details", details), ("steam_get_app_reviews", reviews),
+                     ("steam_get_current_players", players), ("_items_tags", tags),
+                     ("_app_prices", prices), ("_tag_name_map", names)):
+        monkeypatch.setattr(S, name, fn)
+
+
+def test_compare_games_rows_and_highlights(monkeypatch):
+    _compare_fakes(monkeypatch)
+    d = json.loads(run(S.steam_compare_games(S.CompareGamesInput(
+        appids=[1, 2], response_format="json"))))
+    a, b = d["games"]
+    assert a["name"] == "Cheap Classic" and a["trend_pts"] == -1.0
+    assert b["trend_pts"] == -10.0 and b["online_coop"] is True
+    assert a["top_tags"] == ["Roguelike", "Indie"]
+    hl = d["highlights"]
+    assert hl["best_reviewed"]["appid"] == 1 and hl["most_played_now"]["appid"] == 2
+    assert hl["cheapest"]["appid"] == 1 and hl["shared_tags"] == ["Roguelike"]
+    md = run(S.steam_compare_games(S.CompareGamesInput(appids=[1, 2])))
+    assert "| **Busy Sequel** (2) | $29.99 |" in md and "(-10.0)" in md
+    assert "**Shared tags**: Roguelike" in md
+
+
+def test_compare_games_keeps_going_when_one_game_fails(monkeypatch):
+    _compare_fakes(monkeypatch, broken=(2,))
+    d = json.loads(run(S.steam_compare_games(S.CompareGamesInput(
+        appids=[1, 2], response_format="json"))))
+    assert d["games"][1]["error"].startswith("Error")
+    assert d["highlights"]["best_reviewed"] is None      # nothing to compare against
+
+
+def test_compare_games_input_rules():
+    assert S.CompareGamesInput(appids=[5, 5, 6]).appids == [5, 6]
+    for bad in ([1], [1, 1], [1, 2, 3, 4, 5, 6], [0, 1]):
+        with pytest.raises(ValueError):
+            S.CompareGamesInput(appids=bad)
+
+
+# --------------------------------------------------------------------------- #
+# steam_get_update_impact
+# --------------------------------------------------------------------------- #
+
+def test_update_posts_are_told_from_marketing():
+    yes = ["Patch 2.31", "Update 2.3 Patch Notes", "R.E.P.O. v0.4.4",
+           "Counter-Strike 2 Update", "Hotfix 1.2", "Update 2.2 is live!"]
+    no = ["Take Your Shot in Photo Mode Challenge 3.0",
+          "REDstreams — Update 2.2 is coming!",
+          "Revealing UPDATE RELEASE DATE with MAGIC!", "Summer Sale: 50% off",
+          "5th Anniversary Trailer"]
+    assert all(S._is_update_post({"title": t}) for t in yes)
+    assert not any(S._is_update_post({"title": t}) for t in no)
+    assert S._is_update_post({"title": "Big news!", "tags": ["patchnotes"]})
+
+
+def _impact_fakes(monkeypatch, news, windows):
+    seen = []
+
+    async def fake_news(path, params, **k):
+        return {"appnews": {"newsitems": news}}
+
+    async def fake_raw(url, params, cache_ttl=0):
+        seen.append((params["start_date"], params["end_date"]))
+        return windows(params["start_date"], params["end_date"])
+
+    async def paid(appid, cc):
+        return {"appid": appid, "name": "Game", "is_free": False}
+
+    monkeypatch.setattr(S, "_steam_get", fake_news)
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(S, "_app_price", paid)
+    return seen
+
+
+def test_update_impact_compares_before_and_after(monkeypatch):
+    import time as _t
+    now = int(_t.time())
+    patch_at = now - 20 * 86400
+    news = [{"date": patch_at, "title": "Patch 1.1", "url": "u", "tags": []},
+            {"date": now - 10 * 86400, "title": "Summer Sale", "tags": []},
+            {"date": now - 400 * 86400, "title": "Patch 0.9", "tags": []}]
+
+    def windows(start, end):
+        return _summary(90, 10) if end <= patch_at else _summary(60, 40)
+
+    seen = _impact_fakes(monkeypatch, news, windows)
+    d = json.loads(run(S.steam_get_update_impact(S.UpdateImpactInput(
+        appid=1, days=90, response_format="json"))))
+    (e,) = d["updates"]                                    # sale and old patch left out
+    assert e["title"] == "Patch 1.1" and e["change_pts"] == -30.0
+    assert e["before"]["reviews"] == 100 and e["after"]["positive_pct"] == 60.0
+    assert e["after_window_complete"] and not e["next_update_within_window"]
+    assert sorted(seen) == [(patch_at - 7 * 86400, patch_at),
+                            (patch_at, patch_at + 7 * 86400)]
+    assert d["scope"]["purchase_type"] == "steam"
+    md = run(S.steam_get_update_impact(S.UpdateImpactInput(appid=1)))
+    assert "90.0% → 60.0% (**-30.0 pts**" in md
+
+
+def test_update_impact_needs_enough_reviews_and_survives_refusals(monkeypatch):
+    import time as _t
+    now = int(_t.time())
+    news = [{"date": now - 2 * 86400, "title": "Hotfix 2", "tags": []},
+            {"date": now - 5 * 86400, "title": "Hotfix 1", "tags": []}]
+
+    def windows(start, end):
+        return {"success": 2} if start >= now - 2 * 86400 - 1 else _summary(5, 5)
+
+    _impact_fakes(monkeypatch, news, windows)
+    d = json.loads(run(S.steam_get_update_impact(S.UpdateImpactInput(
+        appid=1, response_format="json"))))
+    newest, older = d["updates"]
+    assert newest["after"] is None and newest["change_pts"] is None
+    assert not newest["after_window_complete"]
+    assert older["change_pts"] is None                     # 10 reviews a side < 20
+    assert older["next_update_within_window"]
+    md = run(S.steam_get_update_impact(S.UpdateImpactInput(appid=1)))
+    assert "didn't return the review counts" in md and "too few reviews" in md
+
+
+def test_update_impact_with_no_updates(monkeypatch):
+    _impact_fakes(monkeypatch, [], lambda s, e: _summary(1, 1))
+    md = run(S.steam_get_update_impact(S.UpdateImpactInput(appid=1)))
+    assert "No update or patch-note posts" in md

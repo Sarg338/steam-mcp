@@ -45,7 +45,7 @@ from steam_mcp.server import mcp  # noqa: E402
 # strips the auto-generated titles and inlines enum $defs). If you trim further,
 # re-run and lower DEFS_TOKEN_BUDGET to the new baseline so the gate stays
 # meaningful.
-DEFS_TOKEN_BUDGET = 11_500    # all tool defs on the wire (baseline ~10.6k)
+DEFS_TOKEN_BUDGET = 12_000    # all tool defs on the wire (baseline ~11.5k at 40 tools)
 PER_TOOL_TOKEN_WARN = 700     # flag a single tool def that's an outlier
 RESPONSE_HARD_CAP = 25_000    # Anthropic's per-response guidance (hard fail)
 RESPONSE_WARN = 20_000        # warn band approaching the cap

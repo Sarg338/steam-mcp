@@ -9,7 +9,7 @@
 [![MCP Registry](https://img.shields.io/badge/MCP%20Registry-io.github.Sarg338%2Fsteam--mcp-blue)](https://registry.modelcontextprotocol.io)
 
 A read-only [Model Context Protocol](https://modelcontextprotocol.io) server for the
-public Steam Web API and storefront — **38 tools, 5 prompts, and 2 resources** that let
+public Steam Web API and storefront — **40 tools, 5 prompts, and 2 resources** that let
 any MCP client (Claude Desktop, Claude Code, Cursor, …) answer questions about Steam:
 your friends, games, playtime, and achievements, plus account-independent things like
 sales, reviews, live player counts, Steam Deck compatibility, discovery,
@@ -28,7 +28,7 @@ Install [`uv`](https://docs.astral.sh/uv/), then:
 claude mcp add steam -- uvx steam-mcp
 ```
 
-That's the whole setup. **16 of the 38 tools work with no credential at all** — anything
+That's the whole setup. **18 of the 40 tools work with no credential at all** — anything
 about the store or a game itself:
 
 > *"Is Baldur's Gate 3 worth buying, and how are its recent reviews trending?"*
@@ -123,6 +123,8 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_get_workshop_item` | **Workshop item** metadata (game, tags, subscribers, favorites, views) | no |
 | `steam_get_app_tags` | **A game's top community tags** (Souls-like, Roguelike, Cozy…) | no |
 | `steam_get_app_reviews` | Lifetime verdict, +/- counts, sample reviews; optional **recent (last-N-days) score** via `review_filter='recent'` | no |
+| `steam_compare_games` | **Compare 2-5 games side by side**: price, reviews and their trend, players now, Steam Deck, co-op, tags | no |
+| `steam_get_update_impact` | **Did an update change the reviews?** Review score in the days before vs after each recent patch | no |
 | `steam_analyze_app_reviews` | **Analyze thousands of reviews**: sentiment over time, by language and playtime, Steam Deck, key activations vs Steam purchases, refunds, developer replies | no |
 | `steam_get_featured_specials` | Games currently on sale (regional) | no |
 | `steam_get_store_highlights` | **Top sellers, new releases, or coming soon** | no |
@@ -160,12 +162,11 @@ the tools) and **resources** (reference Steam entities by URI):
 - Resources: `steam://app/{appid}` (store details) and `steam://user/{steamid}`
   (profile + live status).
 
-> **Recent reviews:** Steam's API only exposes a *lifetime* review summary — there
-> is no "last 30 days" field. So `steam_get_app_reviews` with
-> `review_filter='recent'` computes that score itself by paginating the newest
-> reviews within `day_range` days (default 30). For games with a very high volume
-> of recent reviews it counts up to ~600 (raise `recent_max_reviews`, up to
-> 10,000) and marks the result `sampled: true`.
+> **Recent reviews:** `steam_get_app_reviews` with `review_filter='recent'` asks
+> Steam for the exact review count and score of the last `day_range` days (default
+> 30), the same numbers as the store page's "Recent Reviews" row. If Steam refuses
+> that request it falls back to counting the newest reviews, up to
+> `recent_max_reviews`, and marks the result `sampled: true`.
 >
 > **Whose reviews count:** by default both scores count what the store page
 > counts: Steam purchases only for a paid game (key activations are left out) and
@@ -181,7 +182,7 @@ the tools) and **resources** (reference Steam entities by URI):
 
 ### 1. Get a free Steam Web API key *(optional)*
 
-Skip this if you only want the 16 keyless tools — the server runs fine without a
+Skip this if you only want the 18 keyless tools — the server runs fine without a
 key and the account tools simply advertise themselves as unavailable.
 
 To unlock the account tools, visit <https://steamcommunity.com/dev/apikey>, sign in,

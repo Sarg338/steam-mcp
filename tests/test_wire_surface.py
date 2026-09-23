@@ -37,7 +37,7 @@ import steam_mcp.server as S
 
 GOLDEN_PATH = Path(__file__).parent / "golden" / "wire_surface.json"
 
-EXPECTED_TOOLS = 38
+EXPECTED_TOOLS = 40
 EXPECTED_PROMPTS = 5
 EXPECTED_RESOURCE_TEMPLATES = 2
 

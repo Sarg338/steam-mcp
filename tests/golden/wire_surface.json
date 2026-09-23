@@ -254,6 +254,59 @@
     {
       "annotations": {
         "readOnlyHint": true,
+        "title": "Compare Steam Games Side by Side"
+      },
+      "description": "Compare 2-5 games side by side — price, reviews and their trend, players now, Deck, co-op, tags — for \"X or Y?\" questions.",
+      "inputSchema": {
+        "$defs": {
+          "CompareGamesInput": {
+            "additionalProperties": false,
+            "properties": {
+              "appids": {
+                "description": "2-5 appids to compare side by side (resolve names with steam_search_apps first).",
+                "items": {
+                  "type": "integer"
+                },
+                "maxItems": 5,
+                "minItems": 2,
+                "type": "array"
+              },
+              "country_code": {
+                "default": "us",
+                "maxLength": 2,
+                "minLength": 2,
+                "type": "string"
+              },
+              "response_format": {
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "appids"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "params": {
+            "$ref": "#/$defs/CompareGamesInput"
+          }
+        },
+        "required": [
+          "params"
+        ],
+        "type": "object"
+      },
+      "name": "steam_compare_games"
+    },
+    {
+      "annotations": {
+        "readOnlyHint": true,
         "title": "Compare Two Steam Players"
       },
       "description": "Compare two users' libraries: shared games and who has played each more.",
@@ -738,7 +791,7 @@
               },
               "recent_max_reviews": {
                 "default": 600,
-                "description": "Most reviews to tally for review_filter='recent' (100-10000). Raise it for busy games so the recent score isn't 'sampled'.",
+                "description": "Fallback only: most reviews to count for review_filter='recent' if Steam refuses the exact count (100-10000).",
                 "maximum": 10000,
                 "minimum": 100,
                 "type": "integer"
@@ -1906,6 +1959,81 @@
         "type": "object"
       },
       "name": "steam_get_store_highlights"
+    },
+    {
+      "annotations": {
+        "readOnlyHint": true,
+        "title": "Did a Steam Game's Updates Change Its Reviews?"
+      },
+      "description": "Show how a game's reviews moved around each recent update — \"did the last patch hurt it?\".",
+      "inputSchema": {
+        "$defs": {
+          "UpdateImpactInput": {
+            "additionalProperties": false,
+            "properties": {
+              "appid": {
+                "description": "Steam application (game) ID.",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "country_code": {
+                "default": "us",
+                "maxLength": 2,
+                "minLength": 2,
+                "type": "string"
+              },
+              "days": {
+                "default": 90,
+                "description": "How far back to look for updates (7-730 days).",
+                "maximum": 730,
+                "minimum": 7,
+                "type": "integer"
+              },
+              "language": {
+                "default": "all",
+                "description": "Steam language name, or 'all' (default) for every language.",
+                "maxLength": 32,
+                "minLength": 2,
+                "type": "string"
+              },
+              "purchase_type": {
+                "default": "store",
+                "description": "'store' (default, the store page's population), 'steam' or 'all'.",
+                "type": "string"
+              },
+              "response_format": {
+                "default": "markdown",
+                "enum": [
+                  "markdown",
+                  "json"
+                ],
+                "type": "string"
+              },
+              "window_days": {
+                "default": 7,
+                "description": "Days of reviews compared before and after each update (1-30).",
+                "maximum": 30,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "appid"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "params": {
+            "$ref": "#/$defs/UpdateImpactInput"
+          }
+        },
+        "required": [
+          "params"
+        ],
+        "type": "object"
+      },
+      "name": "steam_get_update_impact"
     },
     {
       "annotations": {
