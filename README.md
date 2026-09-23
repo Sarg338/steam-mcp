@@ -163,7 +163,12 @@ the tools) and **resources** (reference Steam entities by URI):
 > is no "last 30 days" field. So `steam_get_app_reviews` with
 > `review_filter='recent'` computes that score itself by paginating the newest
 > reviews within `day_range` days (default 30). For games with a very high volume
-> of recent reviews it counts up to ~600 and marks the result `sampled: true`.
+> of recent reviews it counts up to ~600 (raise `recent_max_reviews`, up to
+> 10,000) and marks the result `sampled: true`.
+>
+> **Whose reviews count:** by default both scores count what the store page
+> counts: Steam purchases only for a paid game (key activations are left out) and
+> everyone for a free game. `purchase_type='all'` or `'steam'` forces either.
 
 > **Market prices:** `steam_get_market_price` uses Steam's Community Market
 > endpoints, which are undocumented and tightly rate-limited. Results are cached

@@ -3027,3 +3027,144 @@ def test_release_script_check_passes_on_the_repo():
     res = subprocess.run([sys.executable, str(root / "scripts" / "release.py"), "check"],
                          capture_output=True, text=True)
     assert res.returncode == 0, res.stderr
+
+
+# --------------------------------------------------------------------------- #
+# Review population: the store page leaves key activations out of a paid
+# game's score and counts everyone for a free one (verified live 2026-09).
+# --------------------------------------------------------------------------- #
+
+def _population_fakes(monkeypatch, is_free, price_ok=True):
+    calls = []
+
+    async def fake_price(appid, cc):
+        if not price_ok:
+            return {"appid": appid, "name": None, "is_free": False}
+        return {"appid": appid, "name": "G", "is_free": is_free}
+
+    async def fake_raw(url, params, cache_ttl=0):
+        calls.append((params["filter"], params["purchase_type"]))
+        if params["filter"] == "recent":
+            return {"success": 1, "cursor": "*",
+                    "reviews": [_review("1", time.time() - 5),
+                                _review("2", time.time() - 99 * 86400)]}
+        return {"success": 1, "reviews": [], "query_summary": {
+            "review_score_desc": "Very Positive", "total_reviews": 10,
+            "total_positive": 9, "total_negative": 1}}
+
+    monkeypatch.setattr(S, "_app_price", fake_price)
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    return calls
+
+
+def test_app_reviews_count_steam_purchases_for_a_paid_game(monkeypatch):
+    calls = _population_fakes(monkeypatch, is_free=False)
+    d = json.loads(run(S.steam_get_app_reviews(S.AppReviewsInput(
+        appid=1, review_filter="recent", limit=0, response_format="json"))))
+    assert d["summary"]["purchase_type"] == "steam"
+    assert calls == [("all", "steam"), ("recent", "steam")]
+
+
+def test_app_reviews_count_everyone_for_a_free_game(monkeypatch):
+    calls = _population_fakes(monkeypatch, is_free=True)
+    d = json.loads(run(S.steam_get_app_reviews(S.AppReviewsInput(
+        appid=1, review_filter="recent", limit=0, response_format="json"))))
+    assert d["summary"]["purchase_type"] == "all"
+    assert calls == [("all", "all"), ("recent", "all")]
+
+
+def test_app_reviews_population_falls_back_when_the_lookup_fails(monkeypatch):
+    calls = _population_fakes(monkeypatch, is_free=False, price_ok=False)
+    out = run(S.steam_get_app_reviews(S.AppReviewsInput(appid=1, limit=0)))
+    assert calls == [("all", "all")]
+    assert "key activations included" in out
+
+
+def test_app_reviews_explicit_population_skips_the_lookup(monkeypatch):
+    calls = _population_fakes(monkeypatch, is_free=True)
+
+    async def boom(appid, cc):
+        raise AssertionError("no lookup for an explicit purchase_type")
+
+    monkeypatch.setattr(S, "_app_price", boom)
+    run(S.steam_get_app_reviews(S.AppReviewsInput(
+        appid=1, limit=0, purchase_type="STEAM")))
+    assert calls == [("all", "steam")]
+    with pytest.raises(ValueError):
+        S.AppReviewsInput(appid=1, purchase_type="keys")
+
+
+def test_should_i_buy_scores_the_store_population(monkeypatch):
+    seen = []
+
+    async def fake_store(path, params, cache_ttl=0):
+        return {"7": {"success": True, "data": {"name": "Paid", "is_free": False}}}
+
+    async def fake_raw(url, params, cache_ttl=0):
+        seen.append((params["filter"], params["purchase_type"]))
+        if params["filter"] == "recent":
+            return {"success": 1, "cursor": "*", "reviews": []}
+        pos = 90 if params["purchase_type"] == "steam" else 50
+        return {"success": 1, "query_summary": {
+            "review_score_desc": "x", "total_positive": pos,
+            "total_negative": 100 - pos, "total_reviews": 100}}
+
+    async def fake_items(appids):
+        return {}
+
+    async def fake_map():
+        return {}
+
+    monkeypatch.setattr(S, "_store_get", fake_store)
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(S, "_items_tags", fake_items)
+    monkeypatch.setattr(S, "_tag_name_map", fake_map)
+    d = json.loads(run(S.steam_should_i_buy(
+        S.ShouldIBuyInput(appid=7, response_format="json"))))
+    assert d["review_lifetime"]["positive_pct"] == 90.0
+    assert d["review_lifetime"]["purchase_type"] == "steam"
+    assert ("recent", "steam") in seen
+
+
+def test_store_purchase_type():
+    assert S._store_purchase_type(False) == "steam"
+    assert S._store_purchase_type(True) == "all"
+    assert S._store_purchase_type(None) == "all"
+
+
+def test_recent_max_reviews_sets_the_page_budget(monkeypatch):
+    pages = []
+
+    async def fake_raw(url, params, cache_ttl=0):
+        pages.append(params["cursor"])
+        n = len(pages)
+        return {"success": 1, "cursor": f"c{n}",
+                "reviews": [_review(f"{n}-{i}", time.time() - 5) for i in range(100)]}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    got, capped = run(S._collect_recent_reviews(1, 30, "us", max_reviews=1500))
+    assert len(pages) == 15 and len(got) == 1500 and capped
+    pages.clear()
+    got, capped = run(S._collect_recent_reviews(1, 30, "us"))
+    assert len(pages) == 6 and capped                  # default stays ~600
+    with pytest.raises(ValueError):
+        S.AppReviewsInput(appid=1, recent_max_reviews=50_000)
+
+
+def test_wire_schemas_drop_null_defaults():
+    optional_seen = 0
+    for t in run(S.mcp.list_tools()):
+        (model,) = _wire(t)["inputSchema"]["$defs"].values()
+        required = set(model.get("required", []))
+        for name, prop in model["properties"].items():
+            assert not ("default" in prop and prop["default"] is None), (t.name, name)
+            if name == "steamid" and "anyOf" in prop:
+                optional_seen += 1
+                assert name not in required            # still optional
+    assert optional_seen                                # the case was exercised
+    # a property literally named "default" would survive; only null values go
+    node = {"properties": {"a": {"default": None, "type": "string"},
+                           "b": {"default": 0, "type": "integer"}}}
+    S._strip_null_defaults(node)
+    assert node == {"properties": {"a": {"type": "string"},
+                                   "b": {"default": 0, "type": "integer"}}}
