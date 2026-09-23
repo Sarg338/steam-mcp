@@ -32,7 +32,31 @@ jobs:
       - name: Pin the v1.x SDK line
         if: matrix.mcp-sdk == 'v1'
         run: pip install "mcp>=1.28,<2"
+      - name: Version and changelog consistency
+        run: python scripts/release.py check
       - name: Ruff lint
         run: ruff check .
       - name: Run tests
         run: pytest -q
+
+  changelog:
+    # Releases are cut from CHANGES.md's [Unreleased] section, so a code change
+    # without an entry there never ships. Flag it (non-blocking: an internal
+    # refactor legitimately has nothing to announce).
+    name: changelog entry
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Code changed without a CHANGES.md entry?
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          changed="$(git diff --name-only "$BASE" "$HEAD")"
+          if echo "$changed" | grep -qE '^(steam_mcp/|manifest\.json$|server\.json$|pyproject\.toml$)' \
+             && ! echo "$changed" | grep -qx 'CHANGES.md'; then
+            echo "::warning title=No changelog entry::This PR changes shipped code but not CHANGES.md. Add a line under '## [Unreleased]' or it won't be released."
+          fi

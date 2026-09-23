@@ -9,7 +9,7 @@
 [![MCP Registry](https://img.shields.io/badge/MCP%20Registry-io.github.Sarg338%2Fsteam--mcp-blue)](https://registry.modelcontextprotocol.io)
 
 A read-only [Model Context Protocol](https://modelcontextprotocol.io) server for the
-public Steam Web API and storefront — **37 tools, 5 prompts, and 2 resources** that let
+public Steam Web API and storefront — **38 tools, 5 prompts, and 2 resources** that let
 any MCP client (Claude Desktop, Claude Code, Cursor, …) answer questions about Steam:
 your friends, games, playtime, and achievements, plus account-independent things like
 sales, reviews, live player counts, Steam Deck compatibility, discovery,
@@ -28,7 +28,7 @@ Install [`uv`](https://docs.astral.sh/uv/), then:
 claude mcp add steam -- uvx steam-mcp
 ```
 
-That's the whole setup. **15 of the 37 tools work with no credential at all** — anything
+That's the whole setup. **16 of the 38 tools work with no credential at all** — anything
 about the store or a game itself:
 
 > *"Is Baldur's Gate 3 worth buying, and how are its recent reviews trending?"*
@@ -108,7 +108,7 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_get_steam_level` | Steam community level | yes |
 | `steam_get_player_bans` | VAC / game / community / economy bans | yes |
 | `steam_get_player_achievements` | Per-game unlocked vs locked achievements | yes |
-| `steam_get_game_schema` | A game's full achievement/stat definitions | yes |
+| `steam_get_game_schema` | A game's achievement definitions (names, descriptions, hidden flag) | yes |
 | `steam_get_global_achievement_percentages` | Achievement rarity (global %) | no |
 | `steam_get_user_game_stats` | **A user's in-game stats** (kills, wins, distance…) for a game | yes |
 | `steam_get_rarest_unlocks` | **A player's rarest achievement unlocks** in a game (by global rarity) | yes |
@@ -123,6 +123,7 @@ Account-independent (works for any game, no SteamID needed):
 | `steam_get_workshop_item` | **Workshop item** metadata (game, tags, subscribers, favorites, views) | no |
 | `steam_get_app_tags` | **A game's top community tags** (Souls-like, Roguelike, Cozy…) | no |
 | `steam_get_app_reviews` | Lifetime verdict, +/- counts, sample reviews; optional **recent (last-N-days) score** via `review_filter='recent'` | no |
+| `steam_analyze_app_reviews` | **Analyze thousands of reviews**: sentiment over time, by language and playtime, Steam Deck, key activations vs Steam purchases, refunds, developer replies | no |
 | `steam_get_featured_specials` | Games currently on sale (regional) | no |
 | `steam_get_store_highlights` | **Top sellers, new releases, or coming soon** | no |
 | `steam_get_wishlist` | **A user's wishlist, with live prices + what's on sale** | yes |
@@ -163,7 +164,12 @@ the tools) and **resources** (reference Steam entities by URI):
 > is no "last 30 days" field. So `steam_get_app_reviews` with
 > `review_filter='recent'` computes that score itself by paginating the newest
 > reviews within `day_range` days (default 30). For games with a very high volume
-> of recent reviews it counts up to ~600 and marks the result `sampled: true`.
+> of recent reviews it counts up to ~600 (raise `recent_max_reviews`, up to
+> 10,000) and marks the result `sampled: true`.
+>
+> **Whose reviews count:** by default both scores count what the store page
+> counts: Steam purchases only for a paid game (key activations are left out) and
+> everyone for a free game. `purchase_type='all'` or `'steam'` forces either.
 
 > **Market prices:** `steam_get_market_price` uses Steam's Community Market
 > endpoints, which are undocumented and tightly rate-limited. Results are cached
@@ -175,7 +181,7 @@ the tools) and **resources** (reference Steam entities by URI):
 
 ### 1. Get a free Steam Web API key *(optional)*
 
-Skip this if you only want the 15 keyless tools — the server runs fine without a
+Skip this if you only want the 16 keyless tools — the server runs fine without a
 key and the account tools simply advertise themselves as unavailable.
 
 To unlock the account tools, visit <https://steamcommunity.com/dev/apikey>, sign in,

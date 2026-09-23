@@ -7,13 +7,13 @@
     "url": "https://github.com/Sarg338/steam-mcp",
     "source": "github"
   },
-  "version": "1.15.0",
+  "version": "1.16.1",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "steam-mcp",
-      "version": "1.15.0",
+      "version": "1.16.1",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
@@ -21,7 +21,7 @@
       "environmentVariables": [
         {
           "name": "STEAM_API_KEY",
-          "description": "Steam Web API key (optional, free at https://steamcommunity.com/dev/apikey). 15 tools work without it — store, games, reviews, prices, deals, player counts, achievement rarity. A key adds the account tools: library, playtime, friends, achievements, wishlist, inventory.",
+          "description": "Steam Web API key (optional, free at https://steamcommunity.com/dev/apikey). 16 tools work without it — store, games, reviews, prices, deals, player counts, achievement rarity. A key adds the account tools: library, playtime, friends, achievements, wishlist, inventory.",
           "isSecret": true
         },
         {

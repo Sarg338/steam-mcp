@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "steam-mcp",
   "display_name": "Steam (read-only)",
-  "version": "1.15.0",
+  "version": "1.16.1",
   "icon": "icon.png",
   "description": "Read-only Steam: friends, games, playtime, achievements, sales, reviews, live player counts.",
   "long_description": "A read-only Model Context Protocol server for the public Steam Web API and storefront. Ask about your friends and their live status, your owned games and playtime, achievement progress and rarity, plus account-independent things like what's on sale, review scores (lifetime and last-30-days), live concurrent player counts, and patch notes.\n\nBring your own key: each user supplies their own free Steam Web API key, requested securely on install. The server is strictly read-only \u2014 it never sends messages, changes status, launches games, or makes purchases. Note that friends lists, owned games, and achievements are only visible when the target Steam profile's privacy is set to Public.",
@@ -166,6 +166,10 @@
       "description": "Review score and samples, lifetime or last-N-days"
     },
     {
+      "name": "steam_analyze_app_reviews",
+      "description": "Analyze thousands of reviews: trend, languages, playtime, Deck, keys vs Steam purchases"
+    },
+    {
       "name": "steam_get_featured_specials",
       "description": "Games currently on sale (regional)"
     },
@@ -214,7 +218,7 @@
     "steam_api_key": {
       "type": "string",
       "title": "Steam Web API Key (optional)",
-      "description": "Optional. 15 of the 37 tools \u2014 store, games, reviews, prices, deals, player counts, Steam Deck, achievement rarity \u2014 work with no key at all. Add a key (32 hex characters, free at https://steamcommunity.com/dev/apikey) to unlock the tools that read a specific account: library, playtime, friends, achievements, wishlist, inventory.",
+      "description": "Optional. 16 of the 38 tools \u2014 store, games, reviews, prices, deals, player counts, Steam Deck, achievement rarity \u2014 work with no key at all. Add a key (32 hex characters, free at https://steamcommunity.com/dev/apikey) to unlock the tools that read a specific account: library, playtime, friends, achievements, wishlist, inventory.",
       "sensitive": true,
       "required": false,
       "default": ""

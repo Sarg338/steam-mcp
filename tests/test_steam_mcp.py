@@ -39,6 +39,11 @@ def test_excerpt_never_exceeds_its_limit():
     assert len(out) == 280 and out.endswith("…")       # over it: capped, not 281
     assert len(S._excerpt("x" * 5000)) == 280
     assert S._excerpt("abcdef", limit=3) == "ab…"
+    # Multi-byte text: the cap counts characters, not bytes. Live Korean and
+    # Japanese review excerpts come back at 280 chars / 660-818 bytes.
+    ko = S._excerpt("가" * 400)
+    assert len(ko) == 280 and ko.endswith("…")
+    assert len(ko.encode("utf-8")) == 840   # 279 hangul x 3 bytes + the ellipsis
 
 
 def test_review_excerpt_respects_the_cap():
@@ -703,15 +708,17 @@ def test_resource_app_reads(monkeypatch):
 
 
 def test_app_details_language(monkeypatch):
-    captured = {}
+    seen = []
 
     async def fake_store(path, params, cache_ttl=0):
-        captured.update(params)
+        seen.append(params.get("l"))
         return {"5": {"success": True, "data": {"name": "G", "type": "game"}}}
 
     monkeypatch.setattr(S, "_store_get", fake_store)
     run(S.steam_get_app_details(S.AppDetailsInput(appid=5, language="french")))
-    assert captured.get("l") == "french"
+    # The caller's own request is in their language; the follow-up that reads
+    # the fields Steam localizes away is deliberately English.
+    assert seen == ["french", "english"]
 
 
 # Feature flags match English category names. A localized response must not turn
@@ -728,16 +735,26 @@ ENGLISH_CATS = [
     {"id": 38, "description": "Online Co-op"},
     {"id": 23, "description": "Steam Cloud"},
 ]
+# A non-Latin script exercises the same path with nothing an English substring
+# match could latch onto by accident, and round-trips multi-byte text through
+# the response. Steam's language name for Korean is "koreana", not "korean".
+KOREAN_CATS = [
+    {"id": 2, "description": "싱글 플레이어"},
+    {"id": 9, "description": "협동"},
+    {"id": 38, "description": "온라인 협동"},
+    {"id": 23, "description": "Steam 클라우드"},
+]
 
 
 async def _none():
     return None
 
 
-def _app_details_store(calls, english_cats=ENGLISH_CATS):
+def _app_details_store(calls, english_cats=ENGLISH_CATS,
+                       localized_cats=LOCALIZED_CATS):
     async def fake_store(path, params, cache_ttl=0):
         calls.append(params.get("l"))
-        cats = english_cats if params.get("l") == "english" else LOCALIZED_CATS
+        cats = english_cats if params.get("l") == "english" else localized_cats
         return {"5": {"success": True,
                       "data": {"name": "G", "type": "game", "categories": cats}}}
     return fake_store
@@ -767,6 +784,33 @@ def test_app_details_features_survive_a_localized_response(monkeypatch):
     assert "Steam Cloud (nuage)" not in text     # a feature, not a play mode
 
 
+def test_app_details_features_survive_a_non_latin_response(monkeypatch):
+    """Same defect in a non-Latin script, where no English substring could match
+    by accident. Verified live against CS2 / Stardew Valley / Elden Ring in
+    koreana, japanese, russian, thai and tchinese."""
+    calls = []
+    monkeypatch.setattr(S, "_store_get",
+                        _app_details_store(calls, localized_cats=KOREAN_CATS))
+    monkeypatch.setattr(S, "_deck_compat", lambda *a, **k: _none())
+    out = run(S.steam_get_app_details(
+        S.AppDetailsInput(appid=5, language="koreana", response_format="json")))
+    d = json.loads(out)
+
+    assert d["features"]["is_singleplayer"] is True
+    assert d["features"]["is_coop"] is True
+    assert d["features"]["is_online_coop"] is True
+    assert d["features"]["has_cloud_saves"] is True
+    # Hangul comes back intact, not escaped or transliterated.
+    assert d["categories"] == [c["description"] for c in KOREAN_CATS]
+    assert calls == ["koreana", "english"]
+
+    calls.clear()
+    text = run(S.steam_get_app_details(
+        S.AppDetailsInput(appid=5, language="koreana")))
+    assert "싱글 플레이어, 협동, 온라인 협동" in text
+    assert "Steam 클라우드" not in text   # a feature, not a play mode
+
+
 def test_app_details_features_skip_the_english_lookup_for_english(monkeypatch):
     calls = []
     monkeypatch.setattr(S, "_store_get", _app_details_store(calls))
@@ -792,6 +836,68 @@ def test_app_details_survives_a_failed_english_lookup(monkeypatch):
     # Best-effort: the tool still answers, with the pre-fix detection quality.
     assert d["name"] == "G"
     assert d["categories"] == [c["description"] for c in LOCALIZED_CATS]
+
+
+def _achievement_store(calls, localized_cats, english_cats, total=42):
+    """appdetails where only the English payload carries the achievement count.
+
+    Verified live 2026-09: CS2, TF2 and Elden Ring all report
+    `achievements.total` as 0 in German while English reports 1 / 520 / 42.
+    """
+    async def fake_store(path, params, cache_ttl=0):
+        english = params.get("l") == "english"
+        calls.append(params.get("l"))
+        return {"5": {"success": True, "data": {
+            "name": "G", "type": "game",
+            "categories": english_cats if english else localized_cats,
+            "achievements": {"total": total if english else 0},
+        }}}
+    return fake_store
+
+
+def test_app_details_reads_the_achievement_count_in_english(monkeypatch):
+    """An app with achievements but no "Steam Achievements" category (CS2's
+    shape) has only the count to go on — and the count is 0 in any language."""
+    calls = []
+    monkeypatch.setattr(S, "_store_get", _achievement_store(
+        calls,
+        [{"id": 1, "description": "Mehrspieler"}],
+        [{"id": 1, "description": "Multi-player"}],
+    ))
+    monkeypatch.setattr(S, "_deck_compat", lambda *a, **k: _none())
+    out = run(S.steam_get_app_details(
+        S.AppDetailsInput(appid=5, language="german", response_format="json")))
+    d = json.loads(out)
+    assert d["achievements_total"] == 42
+    assert d["features"]["has_achievements"] is True
+    assert calls == ["german", "english"]
+
+
+def test_app_details_keeps_a_genuine_zero_for_english(monkeypatch):
+    """The English payload is authoritative for an English caller: no second
+    lookup, and an app that really has no achievements still says so."""
+    calls = []
+    monkeypatch.setattr(S, "_store_get", _achievement_store(
+        calls, LOCALIZED_CATS, ENGLISH_CATS, total=0))
+    monkeypatch.setattr(S, "_deck_compat", lambda *a, **k: _none())
+    out = run(S.steam_get_app_details(
+        S.AppDetailsInput(appid=5, response_format="json")))
+    d = json.loads(out)
+    assert d["achievements_total"] == 0
+    assert d["features"]["has_achievements"] is False
+    assert calls == ["english"]
+
+
+def test_app_details_looks_up_english_without_categories(monkeypatch):
+    """No categories is not a reason to skip the lookup: the achievement count
+    still needs it."""
+    calls = []
+    monkeypatch.setattr(S, "_store_get", _achievement_store(calls, [], []))
+    monkeypatch.setattr(S, "_deck_compat", lambda *a, **k: _none())
+    out = run(S.steam_get_app_details(
+        S.AppDetailsInput(appid=5, language="german", response_format="json")))
+    assert json.loads(out)["achievements_total"] == 42
+    assert calls == ["german", "english"]
 
 
 def test_app_reviews_language(monkeypatch):
@@ -1894,8 +2000,8 @@ def test_user_game_stats(monkeypatch):
 
     monkeypatch.setattr(S, "_steam_get", fake_steam)
     out = run(S.steam_get_user_game_stats(
-        S.PlayerGameInput(steamid="76561197960287930", appid=440,
-                          response_format="json")))
+        S.UserGameStatsInput(steamid="76561197960287930", appid=440,
+                             response_format="json")))
     d = json.loads(out)
     assert d["game"] == "TF2" and d["stat_count"] == 2
     assert d["stats"][0] == {"name": "kills", "value": 100}
@@ -1907,7 +2013,7 @@ def test_user_game_stats_empty(monkeypatch):
 
     monkeypatch.setattr(S, "_steam_get", fake_steam)
     out = run(S.steam_get_user_game_stats(
-        S.PlayerGameInput(steamid="76561197960287930", appid=1)))
+        S.UserGameStatsInput(steamid="76561197960287930", appid=1)))
     assert "No stats available" in out
 
 
@@ -1989,14 +2095,21 @@ def test_global_achievement_percentages_tolerate_string_percents(monkeypatch):
             {"name": "A", "percent": "80.126"},     # string, not a number
             {"name": "B", "percent": 5.0},
             {"name": "C"},                          # absent entirely
-            {"name": "D", "percent": None}]}}
+            {"name": "D", "percent": None},
+            {"name": "E", "percent": "NaN"}]}}      # float() accepts this
 
     monkeypatch.setattr(S, "_steam_get", fake_steam)
     out = run(S.steam_get_global_achievement_percentages(
-        S.AppOnlyInput(appid=1, response_format="json")))
+        S.GlobalAchievementsInput(appid=1, response_format="json")))
     rows = json.loads(out)["achievements"]
-    assert [r["global_pct"] for r in rows] == [0.0, 0.0, 5.0, 80.13]
-    assert {r["api_name"] for r in rows} == {"A", "B", "C", "D"}
+    # Unknown rarity is null and sorts LAST (as the 1.14.1 changelog promised),
+    # never 0.0 — that would rank it as the game's rarest achievement.
+    assert [r["global_pct"] for r in rows] == [5.0, 80.13, None, None, None]
+    assert [r["api_name"] for r in rows[:2]] == ["B", "A"]
+    assert {r["api_name"] for r in rows} == {"A", "B", "C", "D", "E"}
+    md = run(S.steam_get_global_achievement_percentages(
+        S.GlobalAchievementsInput(appid=1)))
+    assert "- B: 5.0% of players" in md and "- C: rarity n/a" in md
 
 
 def test_rarest_unlocks_tolerates_string_percents(monkeypatch):
@@ -2061,7 +2174,7 @@ def test_friends_who_own(monkeypatch):
 
 def test_server_registers_its_surface():
     """The server object builds on whichever SDK major is installed."""
-    assert len(S.mcp._tool_manager.list_tools()) == 37
+    assert len(S.mcp._tool_manager.list_tools()) == 38
     assert len(S.mcp._prompt_manager.list_prompts()) == 5
 
 
@@ -2075,9 +2188,11 @@ def test_tool_descriptions_are_trimmed_to_one_line():
 def test_version_is_in_sync_across_metadata():
     import pathlib
     root = pathlib.Path(__file__).resolve().parent.parent
-    assert f'version = "{S.__version__}"' in (root / "pyproject.toml").read_text()
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+    assert f'version = "{S.__version__}"' in pyproject
     for name in ("server.json", "manifest.json"):
-        assert f'"version": "{S.__version__}"' in (root / name).read_text(), name
+        text = (root / name).read_text(encoding="utf-8")
+        assert f'"version": "{S.__version__}"' in text, name
 
 
 def test_cache_hint_methods_are_all_cacheable():
@@ -2453,9 +2568,14 @@ def test_readme_key_column_matches_the_code():
     of the same fact. Drift means the docs promise something the server denies."""
     import pathlib
 
-    readme = (pathlib.Path(__file__).resolve().parent.parent / "README.md").read_text()
+    # encoding pinned: the table's "yes†" marker is UTF-8, and read_text()
+    # would otherwise decode it through the platform codepage (cp1252 on
+    # Windows), dropping that row from the parse.
+    readme = (pathlib.Path(__file__).resolve().parent.parent / "README.md").read_text(
+        encoding="utf-8"
+    )
     rows = re.findall(r"^\| `(steam_\w+)` \|.*\| (no\*|no|yes†|yes) \|$", readme, re.M)
-    assert len(rows) == 37, f"parsed {len(rows)} tool rows, expected 37"
+    assert len(rows) == 38, f"parsed {len(rows)} tool rows, expected 38"
     for name, marker in rows:
         if marker == "no":
             assert name in S.KEYLESS_TOOLS, f"{name} documented keyless, is not"
@@ -2464,3 +2584,762 @@ def test_readme_key_column_matches_the_code():
         else:
             assert name not in S.KEYLESS_TOOLS and name not in S.PARTLY_KEYLESS_TOOLS, (
                 f"{name} documented as needing a key, but runs without one")
+
+
+# --------------------------------------------------------------------------- #
+# Token footprint: lean schemas, no duplicated structured output, compact JSON
+# --------------------------------------------------------------------------- #
+
+def _schema_keywords(node, found=None):
+    """Collect every schema *keyword* used (property names excluded)."""
+    found = set() if found is None else found
+    if isinstance(node, dict):
+        for key, value in node.items():
+            found.add(key)
+            if key in ("properties", "$defs") and isinstance(value, dict):
+                for sub in value.values():
+                    _schema_keywords(sub, found)
+            elif key not in ("default", "enum", "required"):
+                _schema_keywords(value, found)
+    elif isinstance(node, list):
+        for item in node:
+            _schema_keywords(item, found)
+    return found
+
+
+def test_tool_schemas_are_lean():
+    for t in run(S.mcp.list_tools()):
+        schema = _wire(t)["inputSchema"]
+        assert "title" not in _schema_keywords(schema), t.name
+        assert "ResponseFormat" not in schema.get("$defs", {}), t.name
+        # the enum is inlined where it's used, still fully constraining the field
+        (model,) = schema["$defs"].values()
+        rf = model["properties"]["response_format"]
+        assert rf["enum"] == ["markdown", "json"] and rf["default"] == "markdown"
+        # nothing a caller relies on went missing
+        assert schema["required"] == ["params"], t.name
+        for prop in model["properties"].values():
+            assert "type" in prop or "anyOf" in prop, t.name
+
+
+def test_lean_schemas_is_idempotent_and_keeps_params():
+    before = {t.name: _wire(t)["inputSchema"] for t in run(S.mcp.list_tools())}
+    S._lean_schemas()
+    after = {t.name: _wire(t)["inputSchema"] for t in run(S.mcp.list_tools())}
+    assert before == after
+    props = after["steam_discover"]["$defs"]["DiscoverInput"]["properties"]
+    assert props["limit"] == {"default": 15, "description": "Max results to return (1-50).",
+                              "maximum": 50, "minimum": 1, "type": "integer"}
+
+
+def test_strip_titles_leaves_a_property_named_title():
+    schema = {"title": "M", "type": "object",
+              "properties": {"title": {"title": "Title", "type": "string"}}}
+    S._strip_schema_titles(schema)
+    assert schema == {"type": "object", "properties": {"title": {"type": "string"}}}
+
+
+def test_tools_declare_no_output_schema_and_send_text_once(monkeypatch):
+    for t in run(S.mcp.list_tools()):
+        assert _wire(t).get("outputSchema") is None, t.name
+
+    async def fake(path, params, **k):
+        return {"response": {"player_count": 1234, "result": 1}}
+
+    monkeypatch.setattr(S, "_steam_get", fake)
+    res = run(S.mcp.call_tool("steam_get_current_players", {"params": {"appid": 730}}))
+    # v1 returns (content, structured) as a tuple only when structured output is on
+    assert not isinstance(res, tuple)
+    assert getattr(res, "structured_content", None) is None
+
+
+def test_json_responses_are_compact():
+    out = S._dump({"a": [1, 2], "b": {"c": "é"}})
+    assert out == '{"a":[1,2],"b":{"c":"é"}}'
+
+
+def test_app_prices_fallback_keeps_the_release_date(monkeypatch):
+    # GetItems knows 20's release date but has no price for it (paid, unpriced):
+    # the appdetails fallback fills the price and must not erase release_ts, or
+    # steam_discover's release window silently drops the game.
+    async def fake_steam(path, params, with_key=True, cache_ttl=0):
+        return {"response": {"store_items": [
+            {"appid": 20, "name": "Unpriced", "is_free": False,
+             "best_purchase_option": {}, "release": {"steam_release_date": 1700000000}},
+            {"appid": 21, "name": "KeepMyName", "is_free": False,
+             "best_purchase_option": {}, "release": {"steam_release_date": 1700000001}},
+        ]}}
+
+    async def fake_app_price(appid, cc):
+        if appid == 20:
+            return {"appid": 20, "name": "Unpriced", "is_free": False,
+                    "price": "$19.99", "price_cents": 1999,
+                    "discount_pct": 0, "on_sale": False}
+        # a failed fallback: nothing known
+        return {"appid": appid, "name": None, "price": None, "is_free": False,
+                "on_sale": False, "discount_pct": 0}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    monkeypatch.setattr(S, "_app_price", fake_app_price)
+
+    pm = run(S._app_prices([20, 21], "us"))
+    assert pm[20]["price"] == "$19.99" and pm[20]["price_cents"] == 1999
+    assert pm[20]["release_ts"] == 1700000000
+    assert pm[21]["name"] == "KeepMyName"          # not blanked by the failed fill
+    assert pm[21]["release_ts"] == 1700000001
+
+
+# Every list a JSON response carries is bounded by a `limit`, reports the full
+# count, and says when it was cut — so no response can outgrow the per-result
+# token budget, and the model knows to ask for more.
+
+def test_player_achievements_locked_list_is_capped(monkeypatch):
+    achs = [{"apiname": f"A{i}", "name": f"Ach {i}", "achieved": int(i < 10)}
+            for i in range(400)]
+
+    async def fake_steam(path, params, **k):
+        return {"playerstats": {"success": True, "gameName": "Big",
+                                "achievements": achs}}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    d = json.loads(run(S.steam_get_player_achievements(S.PlayerAchievementsInput(
+        steamid="76561197960287930", appid=1, response_format="json"))))
+    assert d["total"] == 400 and d["unlocked"] == 10
+    assert len(d["locked"]) == 50 and d["locked_truncated"] is True
+    d = json.loads(run(S.steam_get_player_achievements(S.PlayerAchievementsInput(
+        steamid="76561197960287930", appid=1, limit=300, response_format="json"))))
+    assert len(d["locked"]) == 300 and d["locked_truncated"] is True
+    md = run(S.steam_get_player_achievements(S.PlayerAchievementsInput(
+        steamid="76561197960287930", appid=1, limit=20)))
+    assert "…and 370 more" in md
+
+
+def test_game_schema_list_is_capped(monkeypatch):
+    async def fake_steam(path, params, **k):
+        return {"game": {"gameName": "Big", "availableGameStats": {"achievements": [
+            {"name": f"A{i}", "displayName": f"Ach {i}", "description": "d"}
+            for i in range(300)]}}}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    d = json.loads(run(S.steam_get_game_schema(
+        S.GameSchemaInput(appid=1, response_format="json"))))
+    assert d["achievement_count"] == 300
+    assert len(d["achievements"]) == 100 and d["truncated"] is True
+    d = json.loads(run(S.steam_get_game_schema(
+        S.GameSchemaInput(appid=1, limit=250, response_format="json"))))
+    assert len(d["achievements"]) == 250
+
+
+def test_global_achievements_list_is_capped(monkeypatch):
+    async def fake_steam(path, params, **k):
+        return {"achievementpercentages": {"achievements": [
+            {"name": f"A{i}", "percent": i / 10} for i in range(120)]}}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    d = json.loads(run(S.steam_get_global_achievement_percentages(
+        S.GlobalAchievementsInput(appid=1, response_format="json"))))
+    assert d["achievement_count"] == 120 and d["truncated"] is True
+    assert [r["api_name"] for r in d["achievements"]] == [f"A{i}" for i in range(50)]
+    d = json.loads(run(S.steam_get_global_achievement_percentages(
+        S.GlobalAchievementsInput(appid=1, limit=500, response_format="json"))))
+    assert len(d["achievements"]) == 120 and d["truncated"] is False
+
+
+def test_user_game_stats_list_is_capped(monkeypatch):
+    async def fake_steam(path, params, **k):
+        return {"playerstats": {"gameName": "G", "stats": [
+            {"name": f"s{i}", "value": i} for i in range(150)]}}
+
+    monkeypatch.setattr(S, "_steam_get", fake_steam)
+    d = json.loads(run(S.steam_get_user_game_stats(S.UserGameStatsInput(
+        steamid="76561197960287930", appid=1, response_format="json"))))
+    assert d["stat_count"] == 150
+    assert len(d["stats"]) == 100 and d["truncated"] is True
+
+
+def test_inventory_item_list_is_capped(monkeypatch):
+    n = 120
+
+    async def fake_raw(url, params, cache_ttl=0):
+        return {"success": 1, "total_inventory_count": n,
+                "assets": [{"classid": str(i), "instanceid": "0", "amount": "1"}
+                           for i in range(n)],
+                "descriptions": [{"classid": str(i), "instanceid": "0",
+                                  "name": f"Item {i}"} for i in range(n)]}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    d = json.loads(run(S.steam_get_inventory(S.InventoryInput(
+        steamid="76561197960287930", response_format="json"))))
+    assert d["distinct_items"] == n
+    assert len(d["items"]) == 50 and d["truncated"] is True
+    md = run(S.steam_get_inventory(S.InventoryInput(
+        steamid="76561197960287930", limit=10)))
+    assert f"{n} distinct, showing 10." in md and "…and 110 more distinct" in md
+
+
+def test_annotations_are_minimal_and_read_only():
+    for t in run(S.mcp.list_tools()):
+        ann = _wire(t)["annotations"]
+        assert ann["readOnlyHint"] is True, t.name
+        assert ann.get("title"), t.name
+        assert {k for k, v in ann.items() if v is not None} == {"title", "readOnlyHint"}
+
+
+
+# --------------------------------------------------------------------------- #
+# 1.16.1: review scan resilience, overall score, percent guards, cache
+# --------------------------------------------------------------------------- #
+
+def test_pct_value_rejects_non_finite_and_bool():
+    assert S._pct_value("12.5") == 12.5
+    for bad in ("NaN", "nan", "Infinity", "-inf", float("nan"), True, "x", None):
+        assert S._pct_value(bad) is None, bad
+
+
+def _review(rid, ts, up=True):
+    return {"recommendationid": rid, "timestamp_created": ts, "voted_up": up,
+            "votes_up": 0, "author": {"playtime_forever": 60}, "review": "ok"}
+
+
+def test_recent_scan_skips_reviews_repeated_across_pages(monkeypatch):
+    now = time.time()
+    pages = {
+        "*": {"success": 1, "cursor": "c1",
+              "reviews": [_review("1", now - 10), _review("2", now - 20)]},
+        # a new review landed between requests, shifting "2" onto page two
+        "c1": {"success": 1, "cursor": "c2",
+               "reviews": [_review("2", now - 20), _review("3", now - 30, False)]},
+        "c2": {"success": 1, "cursor": "c3", "reviews": []},
+    }
+
+    async def fake_raw(url, params, cache_ttl=0):
+        return pages[params["cursor"]]
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    window, capped = run(S._collect_recent_reviews(1, 30, "us"))
+    assert [r["recommendationid"] for r in window] == ["1", "2", "3"]
+    assert capped is False
+
+
+def test_recent_scan_keeps_what_it_counted_when_a_page_fails(monkeypatch):
+    now = time.time()
+
+    async def fake_raw(url, params, cache_ttl=0):
+        if params["cursor"] == "*":
+            return {"success": 1, "cursor": "c1",
+                    "reviews": [_review("1", now - 10), _review("2", now - 20)]}
+        raise S.httpx2.TimeoutException("slow")
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    window, capped = run(S._collect_recent_reviews(1, 30, "us"))
+    assert len(window) == 2 and capped is True        # partial, and flagged
+
+
+def test_recent_scan_flags_a_refused_page_as_incomplete(monkeypatch):
+    async def fake_raw(url, params, cache_ttl=0):
+        return {"success": 2}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    assert run(S._collect_recent_reviews(1, 30, "us")) == ([], True)
+
+
+def test_app_reviews_survive_a_failed_recent_scan(monkeypatch):
+    # The lifetime summary came back; a timeout in the recent tally must not
+    # turn the whole answer into an error.
+    async def fake_raw(url, params, cache_ttl=0):
+        if params["filter"] == "all":
+            return {"success": 1, "reviews": [], "query_summary": {
+                "review_score_desc": "Very Positive", "total_reviews": 10,
+                "total_positive": 9, "total_negative": 1}}
+        raise S.httpx2.TimeoutException("slow")
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    md = run(S.steam_get_app_reviews(S.AppReviewsInput(appid=1, review_filter="recent")))
+    assert "Very Positive" in md and "90.0%" in md
+    assert "unavailable" in md and "0.0% of 0" not in md
+    d = json.loads(run(S.steam_get_app_reviews(S.AppReviewsInput(
+        appid=1, review_filter="recent", response_format="json"))))
+    assert d["summary"]["positive_pct"] == 90.0
+    assert d["recent"]["reviews_counted"] == 0 and d["recent"]["sampled"] is True
+
+
+def test_app_reviews_overall_score_ignores_the_excerpt_filter(monkeypatch):
+    calls = []
+
+    async def fake_raw(url, params, cache_ttl=0):
+        calls.append((params["review_type"], params["num_per_page"]))
+        if params["review_type"] == "all":
+            summ = {"review_score_desc": "Very Positive", "total_reviews": 10,
+                    "total_positive": 8, "total_negative": 2}
+            return {"success": 1, "reviews": [], "query_summary": summ}
+        # Steam computes query_summary over the filtered set
+        return {"success": 1, "reviews": [_review("9", 1, up=False)],
+                "query_summary": {"total_reviews": 2, "total_positive": 0,
+                                  "total_negative": 2}}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    d = json.loads(run(S.steam_get_app_reviews(S.AppReviewsInput(
+        appid=1, review_type="negative", limit=3, response_format="json"))))
+    assert d["summary"]["positive_pct"] == 80.0          # not 0.0
+    assert d["summary"]["total_positive"] == 8
+    assert [r["voted_up"] for r in d["reviews"]] == [False]
+    assert calls == [("all", 0), ("negative", 3)]
+
+
+def test_app_reviews_default_is_still_one_request(monkeypatch):
+    calls = []
+
+    async def fake_raw(url, params, cache_ttl=0):
+        calls.append((params["review_type"], params["num_per_page"]))
+        return {"success": 1, "reviews": [_review("1", 1)], "query_summary": {
+            "total_reviews": 1, "total_positive": 1, "total_negative": 0}}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    run(S.steam_get_app_reviews(S.AppReviewsInput(appid=1, limit=5)))
+    assert calls == [("all", 5)]
+
+
+def test_ttl_cache_evicts_least_recently_used_not_everything():
+    c = S._TTLCache(maxsize=3)
+    c.set("a", 1, 100)
+    c.set("b", 2, 100)
+    c.set("c", 3, 100)
+    assert c.get("a") == 1              # touch "a": "b" is now the oldest
+    c.set("d", 4, 100)
+    assert c.get("b") is None
+    assert (c.get("a"), c.get("c"), c.get("d")) == (1, 3, 4)
+    c._d["c"] = (0.0, 3)                # "c" expires in place
+    c.set("f", 6, 100)                  # expired entries go before live LRU ones
+    assert "c" not in c._d
+    assert (c.get("a"), c.get("d"), c.get("f")) == (1, 4, 6)
+
+
+def test_concurrent_identical_requests_share_one_fetch(monkeypatch):
+    S._CACHE.clear()
+    calls = {"n": 0}
+
+    class FakeResp:
+        def json(self):
+            return {"ok": True}
+
+    async def fake_http(client, url, params, timeout):
+        calls["n"] += 1
+        await asyncio.sleep(0.01)
+        return FakeResp()
+
+    monkeypatch.setattr(S, "_get_with_retry", fake_http)
+    monkeypatch.setattr(S, "_http_client", lambda: None)
+
+    async def many():
+        return await asyncio.gather(*(
+            S._raw_get("https://store.steampowered.com/x", {"a": 1}, cache_ttl=60)
+            for _ in range(5)))
+
+    results = run(many())
+    assert calls["n"] == 1 and all(r == {"ok": True} for r in results)
+    assert not S._INFLIGHT
+
+
+def test_a_failed_shared_fetch_reaches_every_waiter_and_is_not_cached(monkeypatch):
+    S._CACHE.clear()
+    calls = {"n": 0}
+
+    async def boom(client, url, params, timeout):
+        calls["n"] += 1
+        await asyncio.sleep(0.01)
+        raise S.httpx2.TimeoutException("slow")
+
+    monkeypatch.setattr(S, "_get_with_retry", boom)
+    monkeypatch.setattr(S, "_http_client", lambda: None)
+
+    async def many():
+        return await asyncio.gather(*(
+            S._raw_get("https://store.steampowered.com/y", {}, cache_ttl=60)
+            for _ in range(3)), return_exceptions=True)
+
+    results = run(many())
+    assert calls["n"] == 1
+    assert all(isinstance(r, S.httpx2.TimeoutException) for r in results)
+    assert not S._INFLIGHT and S._CACHE.get(
+        S._cache_key("https://store.steampowered.com/y", {})) is None
+
+
+def test_server_instructions_mark_community_text_untrusted():
+    assert S.mcp.instructions == S.SERVER_INSTRUCTIONS
+    text = S.SERVER_INSTRUCTIONS.lower()
+    assert "untrusted" in text and "review" in text and "never follow" in text
+    assert len(S.SERVER_INSTRUCTIONS) < 400        # paid once per session
+
+
+def test_cancelling_the_shared_fetch_leader_does_not_cancel_its_waiters(monkeypatch):
+    S._CACHE.clear()
+    calls = {"n": 0}
+
+    class FakeResp:
+        def json(self):
+            return {"ok": calls["n"]}
+
+    async def slow(client, url, params, timeout):
+        calls["n"] += 1
+        await asyncio.sleep(0.05)
+        return FakeResp()
+
+    monkeypatch.setattr(S, "_get_with_retry", slow)
+    monkeypatch.setattr(S, "_http_client", lambda: None)
+    url = "https://store.steampowered.com/z"
+
+    async def scenario():
+        leader = asyncio.ensure_future(S._raw_get(url, {}, cache_ttl=60))
+        await asyncio.sleep(0.01)                 # leader's request in flight
+        waiter = asyncio.ensure_future(S._raw_get(url, {}, cache_ttl=60))
+        await asyncio.sleep(0.01)
+        leader.cancel()                           # its client gave up
+        with pytest.raises(asyncio.CancelledError):
+            await leader
+        return await waiter                       # retried as the new leader
+
+    assert run(scenario()) == {"ok": 2}
+    assert calls["n"] == 2 and not S._INFLIGHT
+
+
+def test_manifest_lists_exactly_the_registered_tools():
+    """manifest.json's tool list is what desktop installs show before the server
+    ever runs. A tool added, renamed or removed in code but not there (or vice
+    versa) ships a bundle that describes a different server."""
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    listed = [t["name"] for t in manifest["tools"]]
+    registered = {t.name for t in run(S.mcp.list_tools())}
+    assert len(listed) == len(set(listed)), "duplicate tool in manifest.json"
+    assert set(listed) == registered, (
+        f"only in manifest: {sorted(set(listed) - registered)}; "
+        f"only in server: {sorted(registered - set(listed))}")
+
+
+def test_release_script_check_passes_on_the_repo():
+    import pathlib
+    import subprocess
+    import sys
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    res = subprocess.run([sys.executable, str(root / "scripts" / "release.py"), "check"],
+                         capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+
+
+# --------------------------------------------------------------------------- #
+# Review population: the store page leaves key activations out of a paid
+# game's score and counts everyone for a free one (verified live 2026-09).
+# --------------------------------------------------------------------------- #
+
+def _population_fakes(monkeypatch, is_free, price_ok=True):
+    calls = []
+
+    async def fake_price(appid, cc):
+        if not price_ok:
+            return {"appid": appid, "name": None, "is_free": False}
+        return {"appid": appid, "name": "G", "is_free": is_free}
+
+    async def fake_raw(url, params, cache_ttl=0):
+        calls.append((params["filter"], params["purchase_type"]))
+        if params["filter"] == "recent":
+            return {"success": 1, "cursor": "*",
+                    "reviews": [_review("1", time.time() - 5),
+                                _review("2", time.time() - 99 * 86400)]}
+        return {"success": 1, "reviews": [], "query_summary": {
+            "review_score_desc": "Very Positive", "total_reviews": 10,
+            "total_positive": 9, "total_negative": 1}}
+
+    monkeypatch.setattr(S, "_app_price", fake_price)
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    return calls
+
+
+def test_app_reviews_count_steam_purchases_for_a_paid_game(monkeypatch):
+    calls = _population_fakes(monkeypatch, is_free=False)
+    d = json.loads(run(S.steam_get_app_reviews(S.AppReviewsInput(
+        appid=1, review_filter="recent", limit=0, response_format="json"))))
+    assert d["summary"]["purchase_type"] == "steam"
+    assert calls == [("all", "steam"), ("recent", "steam")]
+
+
+def test_app_reviews_count_everyone_for_a_free_game(monkeypatch):
+    calls = _population_fakes(monkeypatch, is_free=True)
+    d = json.loads(run(S.steam_get_app_reviews(S.AppReviewsInput(
+        appid=1, review_filter="recent", limit=0, response_format="json"))))
+    assert d["summary"]["purchase_type"] == "all"
+    assert calls == [("all", "all"), ("recent", "all")]
+
+
+def test_app_reviews_population_falls_back_when_the_lookup_fails(monkeypatch):
+    calls = _population_fakes(monkeypatch, is_free=False, price_ok=False)
+    out = run(S.steam_get_app_reviews(S.AppReviewsInput(appid=1, limit=0)))
+    assert calls == [("all", "all")]
+    assert "key activations included" in out
+
+
+def test_app_reviews_explicit_population_skips_the_lookup(monkeypatch):
+    calls = _population_fakes(monkeypatch, is_free=True)
+
+    async def boom(appid, cc):
+        raise AssertionError("no lookup for an explicit purchase_type")
+
+    monkeypatch.setattr(S, "_app_price", boom)
+    run(S.steam_get_app_reviews(S.AppReviewsInput(
+        appid=1, limit=0, purchase_type="STEAM")))
+    assert calls == [("all", "steam")]
+    with pytest.raises(ValueError):
+        S.AppReviewsInput(appid=1, purchase_type="keys")
+
+
+def test_should_i_buy_scores_the_store_population(monkeypatch):
+    seen = []
+
+    async def fake_store(path, params, cache_ttl=0):
+        return {"7": {"success": True, "data": {"name": "Paid", "is_free": False}}}
+
+    async def fake_raw(url, params, cache_ttl=0):
+        seen.append((params["filter"], params["purchase_type"]))
+        if params["filter"] == "recent":
+            return {"success": 1, "cursor": "*", "reviews": []}
+        pos = 90 if params["purchase_type"] == "steam" else 50
+        return {"success": 1, "query_summary": {
+            "review_score_desc": "x", "total_positive": pos,
+            "total_negative": 100 - pos, "total_reviews": 100}}
+
+    async def fake_items(appids):
+        return {}
+
+    async def fake_map():
+        return {}
+
+    monkeypatch.setattr(S, "_store_get", fake_store)
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(S, "_items_tags", fake_items)
+    monkeypatch.setattr(S, "_tag_name_map", fake_map)
+    d = json.loads(run(S.steam_should_i_buy(
+        S.ShouldIBuyInput(appid=7, response_format="json"))))
+    assert d["review_lifetime"]["positive_pct"] == 90.0
+    assert d["review_lifetime"]["purchase_type"] == "steam"
+    assert ("recent", "steam") in seen
+
+
+def test_store_purchase_type():
+    assert S._store_purchase_type(False) == "steam"
+    assert S._store_purchase_type(True) == "all"
+    assert S._store_purchase_type(None) == "all"
+
+
+def test_recent_max_reviews_sets_the_page_budget(monkeypatch):
+    pages = []
+
+    async def fake_raw(url, params, cache_ttl=0):
+        pages.append(params["cursor"])
+        n = len(pages)
+        return {"success": 1, "cursor": f"c{n}",
+                "reviews": [_review(f"{n}-{i}", time.time() - 5) for i in range(100)]}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    got, capped = run(S._collect_recent_reviews(1, 30, "us", max_reviews=1500))
+    assert len(pages) == 15 and len(got) == 1500 and capped
+    pages.clear()
+    got, capped = run(S._collect_recent_reviews(1, 30, "us"))
+    assert len(pages) == 6 and capped                  # default stays ~600
+    with pytest.raises(ValueError):
+        S.AppReviewsInput(appid=1, recent_max_reviews=50_000)
+
+
+def test_wire_schemas_drop_null_defaults():
+    optional_seen = 0
+    for t in run(S.mcp.list_tools()):
+        (model,) = _wire(t)["inputSchema"]["$defs"].values()
+        required = set(model.get("required", []))
+        for name, prop in model["properties"].items():
+            assert not ("default" in prop and prop["default"] is None), (t.name, name)
+            if name == "steamid" and "anyOf" in prop:
+                optional_seen += 1
+                assert name not in required            # still optional
+    assert optional_seen                                # the case was exercised
+    # a property literally named "default" would survive; only null values go
+    node = {"properties": {"a": {"default": None, "type": "string"},
+                           "b": {"default": 0, "type": "integer"}}}
+    S._strip_null_defaults(node)
+    assert node == {"properties": {"a": {"type": "string"},
+                                   "b": {"default": 0, "type": "integer"}}}
+
+
+# --------------------------------------------------------------------------- #
+# steam_analyze_app_reviews: streaming aggregates over the review corpus
+# --------------------------------------------------------------------------- #
+
+def _corpus_review(rid, ts, up=True, **extra):
+    r = {"recommendationid": rid, "timestamp_created": ts, "voted_up": up,
+         "votes_up": 0, "language": "english", "review": "fine game",
+         "steam_purchase": True, "received_for_free": False,
+         "author": {"playtime_forever": 600, "playtime_at_review": 120}}
+    r.update(extra)
+    return r
+
+
+def _corpus_fakes(monkeypatch, pages, fail_at=None):
+    """Serve `pages` (cursor -> page) and record each request's params."""
+    calls = []
+
+    async def fake_raw(url, params, cache_ttl=0):
+        calls.append(dict(params))
+        if fail_at is not None and len(calls) == fail_at:
+            raise S.httpx.TimeoutException("slow")
+        return pages[params["cursor"]]
+
+    async def fake_price(appid, cc):
+        return {"appid": appid, "name": "G", "is_free": False}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(S, "_app_price", fake_price)
+    return calls
+
+
+def _analyze(**kw):
+    kw.setdefault("response_format", "json")
+    return json.loads(run(S.steam_analyze_app_reviews(
+        S.ReviewAnalysisInput(appid=1, **kw))))
+
+
+def test_analyze_reviews_aggregates_segments_and_dedupes_across_pages(monkeypatch):
+    now = int(time.time())
+    summary = {"review_score_desc": "Very Positive", "total_reviews": 1000,
+               "total_positive": 900, "total_negative": 100}
+    pages = {
+        "*": {"success": 1, "cursor": "c1", "query_summary": summary, "reviews": [
+            _corpus_review("1", now - 10, votes_up=50),
+            _corpus_review("2", now - 20, up=False, steam_purchase=False,
+                           language="koreana", review="별로예요",
+                           author={"playtime_at_review": 30}),
+            _corpus_review("3", now - 30, primarily_steam_deck=True,
+                           developer_response="Thanks!", refunded=True),
+        ]},
+        "c1": {"success": 1, "cursor": "c2", "reviews": [
+            _corpus_review("3", now - 30),                # overlap: counted once
+            _corpus_review("4", now - 40, up=False, received_for_free=True,
+                           steam_purchase=False, written_during_early_access=True,
+                           votes_up=7),
+        ]},
+        "c2": {"success": 1, "cursor": "c2", "reviews": []},
+    }
+    calls = _corpus_fakes(monkeypatch, pages)
+    d = _analyze(samples=1)
+    sc = d["scanned"]
+    assert (sc["reviews"], sc["positive"], sc["negative"]) == (4, 2, 2)
+    assert sc["complete"] and sc["stop_reason"] == "exhausted"
+    assert sc["next_cursor"] is None
+    assert d["lifetime"]["positive_pct"] == 90.0
+    assert d["scope"]["purchase_type"] == "all"          # default: compare sources
+    seg = d["segments"]
+    assert seg["steam_purchase"]["reviews"] == 2
+    assert seg["key_activation"] == {"reviews": 1, "share_pct": 25.0,
+                                     "positive_pct": 0.0}
+    assert seg["received_for_free"]["reviews"] == 1
+    assert seg["early_access"]["reviews"] == 1
+    assert seg["steam_deck"]["reviews"] == 1
+    assert seg["developer_response"]["reviews"] == 1
+    assert seg["refunded"]["reviews"] == 1
+    langs = {g["language"]: g["reviews"] for g in d["languages"]}
+    assert langs == {"english": 3, "koreana": 1}
+    buckets = {b["bucket"]: b["reviews"] for b in d["playtime_at_review"]["buckets"]}
+    assert buckets == {"<1h": 1, "1-5h": 3}
+    s = d["samples"]
+    assert [r["votes_up"] for r in s["most_helpful_positive"]] == [50]
+    assert [r["votes_up"] for r in s["most_helpful_negative"]] == [7]
+    assert s["newest_negative"][0]["excerpt"] == "별로예요"   # Hangul survives
+    assert [c["filter"] for c in calls] == ["recent"] * 3
+
+
+def test_analyze_reviews_stops_at_max_reviews_with_a_resume_cursor(monkeypatch):
+    now = int(time.time())
+    pages = {c: {"success": 1, "cursor": f"n{i}",
+                 "reviews": [_corpus_review(f"{i}-{j}", now - i * 100 - j)
+                             for j in range(100)]}
+             for i, c in enumerate(["*", "n0", "n1", "n2"])}
+    calls = _corpus_fakes(monkeypatch, pages)
+    d = _analyze(max_reviews=200, samples=0)
+    assert d["scanned"]["reviews"] == 200
+    assert d["scanned"]["stop_reason"] == "max_reviews"
+    assert not d["scanned"]["complete"]
+    assert d["scanned"]["next_cursor"] == "n1"          # the next unread page
+    assert [c["num_per_page"] for c in calls] == [100, 100]
+    calls.clear()
+    resumed = _analyze(max_reviews=100, samples=0, cursor="n1")
+    assert resumed["lifetime"] is None                  # only the first page has it
+    assert calls[0]["cursor"] == "n1"
+
+
+def test_analyze_reviews_stops_at_the_window_edge(monkeypatch):
+    now = int(time.time())
+    pages = {"*": {"success": 1, "cursor": "c1", "reviews": [
+        _corpus_review("1", now - 86400),
+        _corpus_review("2", now - 2 * 86400),
+        _corpus_review("3", now - 9 * 86400),              # outside 7 days
+    ]}}
+    calls = _corpus_fakes(monkeypatch, pages)
+    d = _analyze(day_range=7)
+    assert d["scanned"]["reviews"] == 2
+    assert d["scanned"]["complete"] and d["scanned"]["stop_reason"] == "window_edge"
+    assert len(calls) == 1
+
+
+def test_analyze_reviews_keeps_the_tally_when_a_page_fails(monkeypatch):
+    now = int(time.time())
+    pages = {"*": {"success": 1, "cursor": "c1",
+                   "reviews": [_corpus_review("1", now - 5)]}}
+    _corpus_fakes(monkeypatch, pages, fail_at=2)
+    d = _analyze()
+    assert d["scanned"]["reviews"] == 1
+    assert d["scanned"]["stop_reason"] == "request_error"
+    assert d["scanned"]["next_cursor"] == "c1" and d["scanned"]["error"]
+
+
+def test_analyze_reviews_markdown_flags_a_partial_scan(monkeypatch):
+    now = int(time.time())
+    pages = {"*": {"success": 1, "cursor": "c1",
+                   "reviews": [_corpus_review("1", now - 5)]}}
+    _corpus_fakes(monkeypatch, pages, fail_at=2)
+    md = run(S.steam_analyze_app_reviews(S.ReviewAnalysisInput(appid=1)))
+    assert "Partial" in md and "cursor=`c1`" in md
+    assert "Bought on Steam: 1 (100.0%)" in md
+
+
+def test_analyze_reviews_store_population_and_validation(monkeypatch):
+    calls = _corpus_fakes(monkeypatch, {"*": {"success": 1, "reviews": []}})
+    d = _analyze(purchase_type="store")
+    assert d["scope"]["purchase_type"] == "steam"        # paid game in the fake
+    assert calls[0]["purchase_type"] == "steam"
+    assert d["scanned"]["reviews"] == 0 and d["scanned"]["positive_pct"] is None
+    for bad in ({"max_reviews": 50}, {"max_reviews": 20_001}, {"samples": 6},
+                {"purchase_type": "keys"}, {"day_range": 0}):
+        with pytest.raises(ValueError):
+            S.ReviewAnalysisInput(appid=1, **bad)
+
+
+def test_review_timeline_rolls_up_by_span():
+    from collections import Counter
+    days = Counter({"2026-01-01": 2, "2026-01-02": 1})
+    pos = Counter({"2026-01-01": 1})
+    tl = S._review_timeline(days, pos)
+    assert tl["granularity"] == "day"
+    assert tl["periods"][0] == {"period": "2026-01-01", "reviews": 2,
+                                "positive_pct": 50.0}
+    tl = S._review_timeline(Counter({"2025-01-01": 1, "2025-06-01": 1}), Counter())
+    assert tl["granularity"] == "week"
+    tl = S._review_timeline(Counter({"2020-01-15": 1, "2026-01-15": 3}),
+                            Counter({"2026-01-15": 3}))
+    assert tl["granularity"] == "month"
+    assert tl["periods"] == [
+        {"period": "2020-01", "reviews": 1, "positive_pct": 0.0},
+        {"period": "2026-01", "reviews": 3, "positive_pct": 100.0}]
+    many = Counter({f"{y}-{m:02d}-01": 1 for y in range(2010, 2026)
+                    for m in range(1, 13)})
+    tl = S._review_timeline(many, Counter())
+    assert len(tl["periods"]) == S.REVIEW_TIMELINE_CAP and tl["truncated"]
+    assert S._review_timeline(Counter(), Counter())["periods"] == []

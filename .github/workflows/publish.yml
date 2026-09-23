@@ -1,46 +1,157 @@
-name: Publish to PyPI
+name: Release
 
-# Trusted Publishing (OIDC) — no API token stored. PyPI is configured to trust
-# this workflow file in this repo. Runs when a GitHub Release is published, or
-# manually via the Actions tab. The first successful run creates the project on
-# PyPI (via the pending-publisher you configured).
+# Fully automated releases. Changes accumulate under `## [Unreleased]` in
+# CHANGES.md as PRs merge; this workflow turns them into a release:
+#
+#   prepare   run the checks + tests, bump every version field
+#             (scripts/release.py bump), commit "X.Y.Z: release" to main and
+#             tag vX.Y.Z
+#   build     sdist + wheel, and the .mcpb desktop bundle
+#   pypi      upload to PyPI (Trusted Publishing — no token stored)
+#   github    create the GitHub Release: notes from CHANGES.md, .mcpb attached
+#   registry  publish server.json (PyPI + .mcpb packages) to the MCP Registry
+#
+# It runs once a day and does nothing when [Unreleased] is empty, so releases
+# batch naturally. Run it by hand (Actions → Release → Run workflow) to ship
+# now, e.g. for a broken install or a security fix, optionally forcing the level.
+#
+# The file keeps its name, publish.yml, because PyPI's trusted publisher is
+# registered against this workflow filename.
+#
+# Re-running failed jobs is safe: the PyPI upload skips files already there,
+# the release step updates an existing release, and later jobs key off the tag.
 
 on:
-  release:
-    types: [published]
+  schedule:
+    - cron: "15 3 * * *"   # daily, 03:15 UTC = 10:15pm US Central (CDT); 9:15pm in CST. Off the hour on purpose: GitHub delays or drops top-of-hour schedules under load
   workflow_dispatch:
+    inputs:
+      level:
+        description: "Version bump (auto = the [Unreleased] section's `<!-- release: ... -->` marker, else patch)"
+        type: choice
+        options: [auto, patch, minor, major]
+        default: auto
 
 permissions:
   contents: read
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
-  build:
-    name: Build distributions
+  prepare:
+    name: Bump, tag
     runs-on: ubuntu-latest
+    permissions:
+      contents: write     # push the release commit and tag to main
+    outputs:
+      release: ${{ steps.pending.outputs.release }}
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - name: Anything to release?
+        id: pending
+        run: |
+          python scripts/release.py check
+          if python scripts/release.py pending; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing under [Unreleased] in CHANGES.md — no release today." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Install (with dev extras)
+        if: steps.pending.outputs.release == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Lint, test, token audit
+        if: steps.pending.outputs.release == 'true'
+        run: |
+          ruff check .
+          pytest -q
+          python scripts/audit_tokens.py
+      - name: Bump versions and changelog
+        id: bump
+        if: steps.pending.outputs.release == 'true'
+        env:
+          LEVEL: ${{ inputs.level || 'auto' }}
+        run: |
+          version="$(python scripts/release.py bump "$LEVEL" | tail -n1)"
+          tag="v$version"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "::error::$tag already exists"
+            exit 1
+          fi
+          # The bump must not have broken anything the suite checks (e.g. the
+          # server's reported version), so run the tests once more on it.
+          pytest -q
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Commit and tag
+        if: steps.pending.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          TAG: ${{ steps.bump.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "$VERSION: release"
+          git tag "$TAG"
+          # Atomic: the commit and tag land together or not at all. If main
+          # moved while this ran, the push is rejected and the next run retries.
+          git push --atomic origin HEAD:main "refs/tags/$TAG"
+
+  build:
+    name: Build distributions
+    needs: prepare
+    if: needs.prepare.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Build the .mcpb desktop bundle
+        # Packed from the clean tagged checkout (before `python -m build`
+        # creates dist/), so only what .mcpbignore allows ends up inside.
+        run: |
+          npx -y @anthropic-ai/mcpb@2.1.2 validate manifest.json
+          mkdir -p "$RUNNER_TEMP/mcpb"
+          npx -y @anthropic-ai/mcpb@2.1.2 pack . "$RUNNER_TEMP/mcpb/steam-mcp.mcpb"
+          sha256sum "$RUNNER_TEMP/mcpb/steam-mcp.mcpb"
       - name: Build sdist and wheel
         run: |
-          python -m pip install --upgrade build
+          python -m pip install --upgrade build twine
           python -m build
-      - name: Validate metadata
-        run: |
-          python -m pip install --upgrade twine
           python -m twine check dist/*
       - uses: actions/upload-artifact@v5
         with:
           name: dist
           path: dist/
+      - uses: actions/upload-artifact@v5
+        with:
+          name: mcpb
+          path: ${{ runner.temp }}/mcpb/steam-mcp.mcpb
 
-  publish:
+  pypi:
     name: Publish to PyPI
-    needs: build
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     permissions:
-      id-token: write   # required for Trusted Publishing
+      id-token: write     # Trusted Publishing
     steps:
       - uses: actions/download-artifact@v5
         with:
@@ -48,32 +159,62 @@ jobs:
           path: dist/
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+
+  github:
+    name: GitHub Release
+    needs: [prepare, pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # create the release, upload the bundle
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: actions/download-artifact@v5
+        with:
+          name: mcpb
+          path: mcpb/
+      - uses: actions/download-artifact@v5
+        with:
+          name: dist
+          path: dist/
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          python3 scripts/release.py notes "$VERSION" > "$RUNNER_TEMP/notes.md"
+          title="$(python3 scripts/release.py title "$VERSION")"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$title" --notes-file "$RUNNER_TEMP/notes.md"
+            gh release upload "$TAG" mcpb/steam-mcp.mcpb dist/* --clobber
+          else
+            gh release create "$TAG" mcpb/steam-mcp.mcpb dist/* \
+              --verify-tag --latest --title "$title" --notes-file "$RUNNER_TEMP/notes.md"
+          fi
 
   registry:
     name: Publish to MCP Registry
-    needs: publish          # only after the PyPI upload succeeds
+    needs: [prepare, github]
     runs-on: ubuntu-latest
     permissions:
-      id-token: write       # OIDC auth to the registry — no token to manage
+      id-token: write     # OIDC auth to the registry — no token to manage
       contents: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
       - name: Install mcp-publisher
         run: |
           curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
-      # The .mcpb desktop bundle is built and attached to the GitHub Release by
-      # hand. When one is present, register it as a second package so the
-      # one-click Claude Desktop install is discoverable through the registry
-      # rather than only from the releases page. The registry requires a
-      # fileSha256, and that has to be the hash of the artifact people actually
-      # download — so it is computed here from the released file instead of being
-      # hand-maintained in git, where it would go stale the moment the bundle is
-      # rebuilt. No bundle attached (or a manual workflow_dispatch run, which has
-      # no release) means the entry is skipped and we publish PyPI-only.
-      - name: Add the .mcpb bundle to server.json (when the release has one)
-        if: github.event_name == 'release'
+      # Registers the .mcpb as a second package, hashing the file actually
+      # attached to the release (the registry requires its fileSha256).
+      - name: Add the .mcpb bundle to server.json
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: python3 scripts/add_mcpb_package.py "$TAG"
       - name: Validate server.json
         run: ./mcp-publisher validate
