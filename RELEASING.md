@@ -41,6 +41,17 @@ empty it does nothing. Otherwise it:
 7. Registers the PyPI package and the bundle (with its hash) with the MCP
    Registry.
 
+## Branch clean-up
+
+The same nightly run deletes remote branches that are done with: branches whose
+work reached `main` through a merged PR, with no open PR and nothing that isn't on
+`main`. Anything else, such as a branch pushed without a PR, is kept and listed
+with the reason in the run summary. It runs even when there's nothing to release,
+and it can't block a release. A deleted PR branch can be restored from its PR page.
+To see what it would delete without deleting anything, run the workflow by hand
+with **Branch clean-up: only list what would be deleted** ticked. The logic is in
+`scripts/prune_branches.sh`.
+
 ## Shipping now
 
 For a broken install, a security fix or a regression, go to Actions → Release →
