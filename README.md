@@ -262,6 +262,9 @@ drop this block into the client's MCP config file:
 }
 ```
 
+Installing with an AI agent such as Cline? Point it at
+[`llms-install.md`](llms-install.md), which walks it through the setup.
+
 Config locations: Claude Desktop `claude_desktop_config.json` (`%APPDATA%\Claude\`
 on Windows, `~/Library/Application Support/Claude/` on macOS); Cursor
 `.cursor/mcp.json`; Cline `cline_mcp_settings.json`. Restart the client and the
