@@ -4,8 +4,7 @@ A concise, one-line-per-change history. Versions follow
 [Semantic Versioning](https://semver.org/). Releases:
 <https://github.com/Sarg338/steam-mcp/releases>
 
-## [Unreleased]
-<!-- release: minor -->
+## [1.19.0]
 - **New tool: `steam_analyze_game`.**
 - **New `STEAM_MCP_TOOLS` setting loads a smaller tool set.**
 - **Fixed: parallel requests could fail SSL checks right after startup.**
