@@ -318,6 +318,82 @@ def test_discover_window_honours_requested_sort(monkeypatch):
     assert [r["appid"] for r in json.loads(out)["results"]] == [1, 2, 3]
 
 
+def test_discover_window_price_sort(monkeypatch):
+    # Ported from the abandoned refactor/split-server branch: price sorts inside
+    # a release window rank cheapest first, unknown prices last.
+    now = time.time()
+    prices = {1: 1500, 2: 500, 3: None}
+
+    async def fake_raw(url, params, cache_ttl=0):
+        return {"total_count": 3,
+                "results_html": "".join(_review_row(a, 90, 10) for a in (1, 2, 3))}
+
+    async def fake_app_prices(appids, cc):
+        return {a: {"name": f"G{a}", "release_ts": now - 86400,
+                    "price_cents": prices[a]} for a in appids}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
+    d = json.loads(run(S.steam_discover(S.DiscoverInput(
+        released_within_days=30, sort="price_asc", response_format="json"))))
+    assert [r["appid"] for r in d["results"]] == [2, 1, 3]
+    assert "price_cents" not in d["results"][0]   # internal key not exposed
+    d = json.loads(run(S.steam_discover(S.DiscoverInput(
+        released_within_days=30, sort="price_desc", response_format="json"))))
+    assert [r["appid"] for r in d["results"]] == [1, 2, 3]  # unknown still last
+
+
+def test_discover_window_stops_when_page_passes_window(monkeypatch):
+    # Newest-first enumeration: the first pre-window release proves the rest of
+    # the catalogue is older, so no further search pages are fetched.
+    now = time.time()
+    calls = {"n": 0}
+
+    async def fake_raw(url, params, cache_ttl=0):
+        calls["n"] += 1
+        return {"total_count": 5000,
+                "results_html": "".join(_review_row(a, 90, 100)
+                                        for a in range(1, 101))}
+
+    async def fake_app_prices(appids, cc):
+        return {a: {"name": f"G{a}",
+                    "release_ts": now - (900 if a == 50 else 1) * 86400}
+                for a in appids}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
+    d = json.loads(run(S.steam_discover(S.DiscoverInput(
+        released_within_days=30, limit=5, response_format="json"))))
+    assert calls["n"] == 1                        # stopped after the first page
+    assert d["window_coverage"] == "full"
+    assert 50 not in [r["appid"] for r in d["results"]]
+
+
+def test_discover_window_partial_coverage(monkeypatch):
+    # Every page is full and inside the window: the page cap is hit and the
+    # result is honestly marked partial.
+    now = time.time()
+    calls = {"n": 0}
+
+    async def fake_raw(url, params, cache_ttl=0):
+        calls["n"] += 1
+        start = int(params.get("start", 0))
+        return {"total_count": 5000,
+                "results_html": "".join(_review_row(start + i, 90, 100)
+                                        for i in range(1, 101))}
+
+    async def fake_app_prices(appids, cc):
+        return {a: {"name": f"G{a}", "release_ts": now - 86400} for a in appids}
+
+    monkeypatch.setattr(S, "_raw_get", fake_raw)
+    monkeypatch.setattr(S, "_app_prices", fake_app_prices)
+    d = json.loads(run(S.steam_discover(S.DiscoverInput(
+        released_within_days=365, response_format="json"))))
+    assert calls["n"] == S._WINDOW_MAX_PAGES
+    assert d["window_coverage"] == "partial"
+    assert d["count"] == 15                       # default limit still honoured
+
+
 def test_discover_window_filters_before_the_limit_slice(monkeypatch):
     # 5 results; only the last 2 are inside the window. Asking for 2 must return
     # both, not "whichever of the first 2 happened to qualify" (which is none).
